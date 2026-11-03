@@ -845,7 +845,6 @@ impl App {
 
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        eprintln!("[SERF-BOOT-6f2] resumed");
         if self.window.is_some() {
             return;
         }
@@ -880,17 +879,13 @@ impl ApplicationHandler<UserEvent> for App {
         // this one (`ServoWaker`), but the first request has no prior event to hang
         // off, so it is made here.
         window.request_redraw();
-        eprintln!("[SERF-BOOT-6f2] redraw requested");
         self.window = Some(window);
         self.sync_status();
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
-        eprintln!("[SERF-BOOT-6f2] user_event {event:?}");
         if let Some(engine) = self.engine.as_mut() {
-            eprintln!("[SERF-BOOT-6f2] spin before user_event");
             engine.spin();
-            eprintln!("[SERF-BOOT-6f2] spin after user_event");
         }
         match event {
             UserEvent::Effect(effect) => self.apply_effect(*effect),
@@ -911,20 +906,15 @@ impl ApplicationHandler<UserEvent> for App {
         _id: WindowId,
         event: WindowEvent,
     ) {
-        eprintln!("[SERF-BOOT-6f2] window_event {event:?}");
         if let Some(engine) = self.engine.as_mut() {
-            eprintln!("[SERF-BOOT-6f2] spin before window_event");
             engine.spin();
-            eprintln!("[SERF-BOOT-6f2] spin after window_event");
         }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => {
-                eprintln!("[SERF-BOOT-6f2] redraw begin");
                 if let Some(engine) = self.engine.as_mut() {
                     engine.present();
                 }
-                eprintln!("[SERF-BOOT-6f2] redraw end");
             }
             WindowEvent::Resized(size) => {
                 if let Some(engine) = self.engine.as_mut() {
@@ -994,7 +984,6 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        eprintln!("[SERF-BOOT-6f2] about_to_wait begin");
         // The turn hook. Both the menu and the engine are polled here rather than
         // on a wake-only path, so a menu whose child exits while nothing else is
         // happening still has its answer applied.
@@ -1003,7 +992,6 @@ impl ApplicationHandler<UserEvent> for App {
         }
         self.poll_menu();
         self.poll_engine();
-        eprintln!("[SERF-BOOT-6f2] about_to_wait end");
     }
 }
 
@@ -1034,7 +1022,7 @@ fn create_engine(
         // `surfman::error::Error` implements neither `std::error::Error` nor
         // `Display`, so anyhow's `.context()` is unavailable and `{e}` does not
         // compile — attach the message by hand and format with `{e:?}`.
-        let context = Rc::new(
+        let context: Rc<dyn RenderingContext> = Rc::new(
             servo::WindowRenderingContext::new(display_handle, window_handle, window.inner_size())
                 .map_err(|e| anyhow::anyhow!("creating the Servo rendering context: {e:?}"))?,
         );

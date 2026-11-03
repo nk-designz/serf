@@ -130,11 +130,13 @@ pub trait Engine {
     fn url(&self) -> String;
     /// Handle a viewport resize.
     fn resize(&mut self, width: u32, height: u32);
-    /// Drive the engine's own event loop. No-op for backends that have none
-    /// (the `StubEngine`); Servo needs this from the wake event.
-    fn spin(&mut self) {}
-    /// Present the last painted frame. No-op for `StubEngine`.
-    fn present(&mut self) {}
+    /// Drive the engine's event loop. The stub implements this as a no-op.
+    /// Required rather than defaulted: forgetting to override it leaves Servo
+    /// initialized but unable to process page or paint messages.
+    fn spin(&mut self);
+    /// Present the last painted frame. The stub implements this as a no-op.
+    /// Required because a default no-op makes a real engine's window invisible.
+    fn present(&mut self);
 
     // --- page interaction -------------------------------------------------
     //
@@ -343,6 +345,10 @@ impl Engine for StubEngine {
         self.size = (width, height);
     }
 
+    fn spin(&mut self) {}
+
+    fn present(&mut self) {}
+
     fn send_key(&mut self, key: &PageKey) -> bool {
         self.received_keys.push(key.clone());
         self.key_handled.unwrap_or(false)
@@ -423,7 +429,7 @@ pub mod servo_backend {
         Code, DevicePoint, DeviceVector2D, InputEvent, Key, KeyState, Location, Modifiers,
         MouseButton, MouseButtonAction, MouseButtonEvent, MouseMoveEvent, NamedKey,
         RenderingContext, Scroll, Servo, WebView, WebViewBuilder, WebViewPoint, WebViewVector,
-        WheelDelta, WheelEvent, WheelMode, WindowRenderingContext,
+        WheelDelta, WheelEvent, WheelMode,
     };
     use url::Url;
 
@@ -437,7 +443,7 @@ pub mod servo_backend {
     /// An [`Engine`] backed by a live Servo `WebView`.
     pub struct ServoEngine {
         servo: Servo,
-        rendering_context: Rc<WindowRenderingContext>,
+        rendering_context: Rc<dyn RenderingContext>,
         webview: RefCell<Option<WebView>>,
         zoom: f32,
         injected_css: RefCell<Vec<String>>,
@@ -451,7 +457,7 @@ pub mod servo_backend {
     }
 
     impl ServoEngine {
-        pub fn new(servo: Servo, rendering_context: Rc<WindowRenderingContext>) -> Self {
+        pub fn new(servo: Servo, rendering_context: Rc<dyn RenderingContext>) -> Self {
             Self {
                 servo,
                 rendering_context,
@@ -487,27 +493,6 @@ pub mod servo_backend {
             &self.servo
         }
 
-        /// Drive Servo's event loop; call from the winit loop on every wake.
-        pub fn spin(&self) {
-            self.servo.spin_event_loop();
-        }
-
-        /// Present the last painted frame.
-        pub fn present(&self) {
-            let (device, context) = self.rendering_context.surfman_details();
-            eprintln!("[SERF-BOOT-6f2] surface before paint: {}", device.context_surface_info(&context).map(|s| s.is_some()).unwrap_or(false));
-            drop((device, context));
-            if let Some(webview) = self.webview.borrow().as_ref() {
-                eprintln!("[SERF-BOOT-6f2] webview paint start");
-                webview.paint();
-                eprintln!("[SERF-BOOT-6f2] webview paint end");
-            } else {
-                eprintln!("[SERF-BOOT-6f2] NO WEBVIEW");
-            }
-            self.rendering_context.present();
-            eprintln!("[SERF-BOOT-6f2] context present end");
-        }
-
         fn with_webview<T>(&self, f: impl FnOnce(&WebView) -> T) -> Result<T> {
             let webview = self.webview.borrow();
             let webview = webview
@@ -533,6 +518,17 @@ pub mod servo_backend {
     }
 
     impl Engine for ServoEngine {
+        fn spin(&mut self) {
+            self.servo.spin_event_loop();
+        }
+
+        fn present(&mut self) {
+            if let Some(webview) = self.webview.borrow().as_ref() {
+                webview.paint();
+            }
+            self.rendering_context.present();
+        }
+
         fn navigate(&mut self, url: &str) -> Result<()> {
             let parsed = Url::parse(url).map_err(|e| anyhow!("invalid url {url:?}: {e}"))?;
             self.with_webview(|w| w.load(parsed.clone()))?;
