@@ -224,6 +224,11 @@ pub struct StatusLine {
 }
 
 impl StatusLine {
+    /// Chrome stays hidden until a command prompt or unfinished chord needs it.
+    pub fn requires_overlay(&self) -> bool {
+        self.mode == "command" || !self.pending.is_empty()
+    }
+
     /// `[normal] title` — the left-hand segment.
     pub fn left(&self) -> String {
         let mode = if self.mode.is_empty() { "normal" } else { &self.mode };
@@ -611,6 +616,17 @@ mod tests {
             assert_ne!(glyph(c), BOX, "missing glyph for {c:?}");
         }
         let _ = b;
+    }
+
+    #[test]
+    fn command_and_pending_chord_require_overlay() {
+        let mut status = StatusLine { mode: "normal".into(), ..Default::default() };
+        assert!(!status.requires_overlay());
+        status.mode = "command".into();
+        assert!(status.requires_overlay());
+        status.mode = "normal".into();
+        status.pending = "g".into();
+        assert!(status.requires_overlay());
     }
 
     #[test]

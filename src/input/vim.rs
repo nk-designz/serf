@@ -307,6 +307,12 @@ impl VimState {
         &self.command
     }
 
+    /// Prefill the open prompt with the active page URL (`O`).
+    pub fn prefill_open_url(&mut self, url: &str) {
+        debug_assert_eq!(self.mode, Mode::Command);
+        self.command = format!("open {url}");
+    }
+
     /// The pending chord, rendered for the status overlay (empty if none).
     pub fn pending_display(&self) -> String {
         self.pending
@@ -409,6 +415,12 @@ impl VimState {
                     self.command.clear();
                 }
             }
+            Action::OpenPrompt { .. } => {
+                self.mode = Mode::Command;
+                self.pending.clear();
+                self.command.clear();
+                self.command.push_str("open ");
+            }
             Action::SubmitCommand(_) => {
                 self.mode = Mode::Normal;
                 self.pending.clear();
@@ -506,6 +518,35 @@ mod tests {
         );
         assert_eq!(s.mode, Mode::Normal);
         assert_eq!(s.command_line(), "");
+    }
+
+    #[test]
+    fn open_prompt_accepts_a_url_and_submits_open_command() {
+        let mut s = state();
+        assert_eq!(s.feed(ch('o')), Action::OpenPrompt { edit: false });
+        assert_eq!(s.mode, Mode::Command);
+        assert_eq!(s.command_line(), "open ");
+        for c in "https://duckduckgo.com/".chars() {
+            s.feed(ch(c));
+        }
+        assert_eq!(
+            s.feed(Key::Enter),
+            Action::SubmitCommand("open https://duckduckgo.com/".into())
+        );
+        assert_eq!(s.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn edit_open_prompt_prefills_current_url() {
+        let mut s = state();
+        assert_eq!(s.feed(ch('O')), Action::OpenPrompt { edit: true });
+        assert_eq!(s.mode, Mode::Command);
+        s.prefill_open_url("https://example.com/");
+        assert_eq!(s.command_line(), "open https://example.com/");
+        assert_eq!(
+            s.feed(Key::Enter),
+            Action::SubmitCommand("open https://example.com/".into())
+        );
     }
 
     #[test]

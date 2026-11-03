@@ -354,13 +354,15 @@ impl App {
     fn sync_status(&self) {
         let session = self.shared.session.lock().unwrap();
         let tab = session.current();
-        self.shared.overlay.set_status(StatusLine {
+        let status = StatusLine {
             mode: self.vim.mode.as_str().to_string(),
             title: tab.title.clone(),
             url: tab.current().to_string(),
             pending: self.vim.pending_display(),
             message: self.vim.command_line().to_string(),
-        });
+        };
+        self.shared.overlay.set_visible(status.requires_overlay());
+        self.shared.overlay.set_status(status);
     }
 
     // --- the page's side of the loop -------------------------------------
@@ -805,6 +807,12 @@ impl App {
                 self.apply_effect(e);
             }
             Action::TabMenu => self.open_tab_menu(),
+            Action::OpenPrompt { edit } => {
+                if edit {
+                    let url = self.shared.session.lock().unwrap().current().current().to_string();
+                    self.vim.prefill_open_url(&url);
+                }
+            }
             Action::PassThrough => {
                 // Unreachable from the event loop, which forwards page-owned keys
                 // itself (`App::forward_key`) before the action is applied. Kept
