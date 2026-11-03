@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -233,19 +233,41 @@ pub type ReloadHook = Box<dyn Fn(&Config) + Send + 'static>;
 /// Returns the watcher handle; dropping it stops watching. The watch is on
 /// the *parent directory* because editors commonly replace the file by
 /// rename, which breaks an inode watch.
+///
+/// Two guards keep this from feeding itself, which is not theoretical: the
+/// inotify backend reports `Access(Open)`/`Access(Read)` as well as writes, so
+/// a watcher that reacts to every event fires again on its *own* read of the
+/// file the moment anything else reads it — a self-sustaining reload loop at
+/// the rate of the settle sleep below. So: only content-changing event kinds
+/// are considered, and a reload only happens when the text actually differs
+/// from what was last applied.
 pub fn spawn_watcher(
     store: SharedConfig,
     path: PathBuf,
     mut hook: Option<ReloadHook>,
 ) -> notify::Result<notify::RecommendedWatcher> {
-    use notify::{Event, RecursiveMode, Watcher};
+    use notify::{Event, EventKind, RecursiveMode, Watcher};
 
     let watched_name = path
         .file_name()
         .map(|n| n.to_os_string());
     let reload_path = path.clone();
+    // The text as of the last successful apply, so a same-content event
+    // (`touch`, a redundant save, a duplicate inotify notification for one
+    // write) is a no-op.
+    let applied: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
         let Ok(event) = res else { return };
+
+        // Reads report as `Access`; only actual content changes matter.
+        if !matches!(
+            event.kind,
+            EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+        ) {
+            return;
+        }
+
         let touches_config = event
             .paths
             .iter()
@@ -253,10 +275,26 @@ pub fn spawn_watcher(
         if !touches_config {
             return;
         }
-        // Give the writer a moment to finish the rename/write.
+
+        // Give the writer a moment to finish the rename/write. This is a
+        // settle delay on a real write, not a poll: no event, no wakeup.
         std::thread::sleep(Duration::from_millis(60));
-        match Config::load(&reload_path) {
+
+        // A `Remove` (or a truncated file caught mid-write) just keeps the
+        // previous config rather than resetting to defaults.
+        let Ok(text) = std::fs::read_to_string(&reload_path) else {
+            return;
+        };
+        match applied.lock() {
+            Ok(current) if current.as_deref() == Some(text.as_str()) => return,
+            Ok(_) => {}
+            Err(_) => return,
+        }
+        match Config::from_str(&text) {
             Ok(new_cfg) => {
+                if let Ok(mut current) = applied.lock() {
+                    *current = Some(text);
+                }
                 if let Ok(mut guard) = store.write() {
                     *guard = new_cfg.clone();
                 }
@@ -325,5 +363,64 @@ mod tests {
         std::env::set_var("HOME", "/home/tester");
         assert_eq!(expand_tilde("~/x/y"), PathBuf::from("/home/tester/x/y"));
         assert_eq!(expand_tilde("/abs"), PathBuf::from("/abs"));
+    }
+
+    /// Regression: the inotify backend reports `Access(Open/Read)` as well as
+    /// writes, so a watcher that reacts to every event fires on its own read
+    /// of the file — `serf-msg theme reload` (which re-reads the config) put
+    /// the process into a self-sustaining ~15 reloads/second loop. Reads must
+    /// be inert, and one content change must reload exactly once.
+    #[test]
+    fn reads_do_not_reload_but_a_write_reloads_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let dir = std::env::temp_dir().join(format!("serf-watch-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("config.toml");
+        std::fs::write(&cfg_path, "[general]\nhomepage = \"about:blank\"\n").unwrap();
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        let _watcher = spawn_watcher(
+            shared(Config::default()),
+            cfg_path.clone(),
+            Some(Box::new(move |_cfg| {
+                counter.fetch_add(1, Ordering::SeqCst);
+            })),
+        )
+        .expect("watcher");
+
+        // Let the watch settle before provoking anything.
+        std::thread::sleep(Duration::from_millis(200));
+
+        // What `Effect::ReloadTheme` does: re-read the file from disk.
+        for _ in 0..50 {
+            std::fs::read_to_string(&cfg_path).unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "reading the config must not trigger a reload"
+        );
+
+        // A real edit must still be picked up...
+        std::fs::write(&cfg_path, "[general]\nhomepage = \"https://example.com/\"\n").unwrap();
+        let mut waited = 0;
+        while hits.load(Ordering::SeqCst) == 0 && waited < 3_000 {
+            std::thread::sleep(Duration::from_millis(50));
+            waited += 50;
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "one write, one reload");
+
+        // ...and the reload it performs must not itself cause another.
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "the reload must not feed itself"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
