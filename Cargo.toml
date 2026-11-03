@@ -64,6 +64,8 @@ thiserror = "2"
 servo = { version = "0.7", optional = true, features = [
     "brotli-compression-stream",
     "webgl",
+    "webcrypto",
+    "media-gstreamer",
 ] }
 euclid = { version = "0.22", optional = true }
 url = { version = "2", optional = true }

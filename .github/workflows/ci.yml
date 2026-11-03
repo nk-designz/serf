@@ -53,13 +53,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install SpiderMonkey build toolchain
+      - name: Install SpiderMonkey + media build toolchain
         run: |
           sudo apt-get update
+          # The gstreamer*-sys crates resolve their libraries through pkg-config,
+          # so the -dev packages are build-time requirements once the servo
+          # `media-gstreamer` feature is on (plain `libgstreamer1.0-dev` alone is
+          # not enough: app/audio/video/base come from plugins-base, and
+          # play/sdp/webrtc from plugins-bad).
           sudo apt-get install -y --no-install-recommends \
             clang cmake python3 make automake autoconf \
             pkg-config libfontconfig1-dev libfreetype6-dev \
-            libxkbcommon-dev libwayland-dev libssl-dev
+            libxkbcommon-dev libwayland-dev libssl-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libgstreamer-plugins-bad1.0-dev
+
+      - name: Confirm the GStreamer pkg-config modules resolve
+        run: |
+          # Fail here with a readable message rather than 15 minutes into the
+          # build if one of the -dev packages is missing or renamed.
+          for m in gstreamer-1.0 gstreamer-app-1.0 gstreamer-audio-1.0 \
+                   gstreamer-video-1.0 gstreamer-base-1.0 gstreamer-sdp-1.0 \
+                   gstreamer-webrtc-1.0 gstreamer-play-1.0; do
+            pkg-config --exists "$m" || { echo "MISSING: $m"; exit 1; }
+            echo "$m -> $(pkg-config --modversion "$m")"
+          done
 
       - uses: dtolnay/rust-toolchain@stable
 
