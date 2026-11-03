@@ -609,19 +609,22 @@ fn create_engine(homepage: &str, window: Option<&Window>) -> Result<Box<dyn Engi
     #[cfg(feature = "servo")]
     {
         use serf::browser::engine::servo_backend::ServoEngine;
+        use servo::RenderingContext;
         use std::rc::Rc;
         use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
         let window = window.context("the servo backend needs a winit window")?;
         let display_handle = window.display_handle().context("display handle")?;
         let window_handle = window.window_handle().context("window handle")?;
-        // `surfman::error::Error` does not implement `std::error::Error`, so
-        // anyhow's `.context()` cannot be used on it — attach the message by
-        // hand instead.
-        let context = Rc::new(
+        // `surfman::error::Error` implements neither `std::error::Error` nor
+        // `Display`, so anyhow's `.context()` is unavailable and `{e}` does not
+        // compile — attach the message by hand and format with `{e:?}`.
+        let context: Rc<dyn RenderingContext> = Rc::new(
             servo::WindowRenderingContext::new(display_handle, window_handle, window.inner_size())
-                .map_err(|e| anyhow::anyhow!("creating the Servo rendering context: {e}"))?,
+                .map_err(|e| anyhow::anyhow!("creating the Servo rendering context: {e:?}"))?,
         );
+        // `make_current` comes from the `RenderingContext` trait, so that trait
+        // must be in scope here (it is only auto-available inside engine.rs).
         let _ = context.make_current();
 
         let servo = servo::ServoBuilder::default()
