@@ -24,7 +24,7 @@ path = "src/bin/serf-msg.rs"
 default = []
 # The Servo engine backend. Off by default because pulling it in requires
 # building SpiderMonkey (mozjs_sys) from source — see README / BUILD notes.
-servo = ["dep:servo", "dep:euclid", "dep:url", "dep:webrender_api", "dep:tracing"]
+servo = ["dep:servo", "dep:euclid", "dep:url", "dep:webrender_api", "dep:tracing", "dep:pkcs1"]
 
 [dependencies]
 # --- Wayland-only windowing: no GTK, no Qt, no X11 ---
@@ -67,6 +67,13 @@ servo = { version = "0.7", optional = true, features = [
     "webcrypto",
     "media-gstreamer",
 ] }
+# servo-script pins `rsa = "=0.10.0-rc.18"`, which declares `pkcs1 = "^0.8.0-rc.4"`
+# but is written against the rc API, where `RsaPrivateKey` carried a lifetime.
+# Cargo legitimately prefers the FINAL `pkcs1 0.8.0`, where that type instead
+# takes a generic `U` — and the rsa rc then fails to compile (E0107, 8 errors).
+# Pinning pkcs1 to the rc keeps the pair consistent. Verified locally: rsa
+# 0.10.0-rc.18 compiles clean against pkcs1 0.8.0-rc.5.
+pkcs1 = { version = "=0.8.0-rc.5", optional = true }
 euclid = { version = "0.22", optional = true }
 url = { version = "2", optional = true }
 webrender_api = { version = "0.70", optional = true }
