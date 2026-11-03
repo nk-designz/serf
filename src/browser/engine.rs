@@ -495,7 +495,7 @@ pub mod servo_backend {
         /// Present the last painted frame.
         pub fn present(&self) {
             let (device, context) = self.rendering_context.surfman_details();
-            eprintln!("[SERF-BOOT-6f2] surface before paint: {:?}", device.context_surface_info(&context));
+            eprintln!("[SERF-BOOT-6f2] surface before paint: {}", device.context_surface_info(&context).map(|s| s.is_some()).unwrap_or(false));
             drop((device, context));
             if let Some(webview) = self.webview.borrow().as_ref() {
                 eprintln!("[SERF-BOOT-6f2] webview paint start");
