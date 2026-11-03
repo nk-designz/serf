@@ -248,24 +248,105 @@ impl StatusLine {
     }
 }
 
+/// Truncate `text` to fit `max_px`, marking the cut with `...`.
+///
+/// `keep_tail` is for a command line you are still typing: the end is what you
+/// are looking at, so the marker goes at the front instead.
+fn clamp_text(text: &str, max_px: u32, scale: u32, keep_tail: bool) -> String {
+    if Canvas::text_width(text, scale) <= max_px {
+        return text.to_string();
+    }
+    let cell = GLYPH_ADVANCE * scale.max(1);
+    let chars: Vec<char> = text.chars().collect();
+    let marker = "...";
+    let mut budget = (max_px / cell) as usize;
+    if budget <= marker.len() {
+        return String::new();
+    }
+    budget -= marker.len();
+    if keep_tail {
+        let tail: String = chars[chars.len().saturating_sub(budget)..].iter().collect();
+        format!("{marker}{tail}")
+    } else {
+        let head: String = chars[..budget.min(chars.len())].iter().collect();
+        format!("{head}{marker}")
+    }
+}
+
+/// Split the bar's width between the title and the right-hand field.
+///
+/// Drawing both segments at fixed anchors meant a long page title and a long URL
+/// were painted on top of each other — which is exactly what a command prompt
+/// with a long address looked like. The badge (`[command] `) always survives,
+/// because it is how you know which mode is eating your keystrokes; the title
+/// gives way first, then the right-hand field.
+pub fn fit_segments(
+    left: &str,
+    right: &str,
+    avail: u32,
+    scale: u32,
+    keep_right_tail: bool,
+) -> (String, String) {
+    let scale = scale.max(1);
+    let gap = GLYPH_ADVANCE * scale;
+    if Canvas::text_width(left, scale) + Canvas::text_width(right, scale) <= avail {
+        return (left.to_string(), right.to_string());
+    }
+
+    let badge = match left.find(']') {
+        Some(end) => &left[..=end],
+        None => "",
+    };
+    let title = left[badge.len()..].trim_start();
+    let badge_w = Canvas::text_width(badge, scale);
+
+    // Everything after "[mode] " is shared: the title and the right-hand field
+    // split it in proportion to what each one wants to show, so neither starves
+    // the other. A greedy right-hand field would erase the page title entirely.
+    let fixed = badge_w + GLYPH_ADVANCE * scale;
+    let inner = avail.saturating_sub(fixed + gap);
+    let want_left = Canvas::text_width(title, scale);
+    let want_right = Canvas::text_width(right, scale);
+    let total = want_left.saturating_add(want_right).max(1);
+    let left_share = ((inner as u64 * want_left as u64) / total as u64) as u32;
+    let right_share = inner.saturating_sub(left_share);
+
+    let right = clamp_text(right, right_share, scale, keep_right_tail);
+    let title = clamp_text(title, left_share, scale, false);
+    let left = if title.is_empty() {
+        badge.to_string()
+    } else {
+        format!("{badge} {title}")
+    };
+    (left, right)
+}
+
 /// Draw a status line into `canvas`.
 ///
 /// The bar is filled with the palette background, the mode/title on the left
 /// in the foreground colour, and the pending chord / URL right-aligned in the
 /// dim colour (accent when a chord is pending, since you are mid-command).
+/// Both segments are fitted to the bar first, so they cannot overlap.
 pub fn render_status(canvas: &mut Canvas, palette: &Palette, status: &StatusLine, scale: u32) {
     canvas.clear(palette.background);
 
     let scale = scale.max(1);
     let baseline_y = ((canvas.height.saturating_sub(GLYPH_H * scale)) / 2) as i32;
     let pad = (3 * scale) as i32;
+    let avail = canvas.width.saturating_sub((2 * pad) as u32);
+
+    let (left, right) = fit_segments(
+        &status.left(),
+        &status.right(),
+        avail,
+        scale,
+        !status.message.is_empty(),
+    );
 
     // Accent mode badge.
-    let left = status.left();
     canvas.draw_text(pad, baseline_y, &left, palette.foreground, scale);
 
     // Right-aligned status.
-    let right = status.right();
     let right_width = Canvas::text_width(&right, scale) as i32;
     let right_x = (canvas.width as i32 - right_width - pad).max(pad);
     let right_color = if status.pending.is_empty() {
@@ -795,6 +876,41 @@ mod tests {
         c.write_to(&mut out);
         assert_eq!(&out[0..4], &[0x33, 0x22, 0x11, 0xff]);
         assert_eq!(&out[4..8], &[0x33, 0x22, 0x11, 0xff]);
+    }
+
+    #[test]
+    fn status_segments_are_fitted_so_they_cannot_overlap() {
+        let title = "a".repeat(300);
+        let url = "https://example.com/".repeat(20);
+        let avail = 400;
+        let (left, right) = fit_segments(&format!("[normal] {title}"), &url, avail, 1, false);
+        assert!(
+            Canvas::text_width(&left, 1) + GLYPH_ADVANCE + Canvas::text_width(&right, 1) <= avail,
+            "left {:?} / right {:?} must fit inside {avail}px",
+            Canvas::text_width(&left, 1),
+            Canvas::text_width(&right, 1)
+        );
+        assert!(left.starts_with("[normal]"), "the mode badge must survive");
+        assert!(left.ends_with("..."), "a truncated title is marked");
+    }
+
+    #[test]
+    fn command_prompt_keeps_the_end_of_the_line_being_typed() {
+        let cmd = format!("open https://example.com/{}", "x".repeat(200));
+        let (left, right) = fit_segments("[command] Title", &cmd, 200, 1, true);
+        assert!(right.starts_with("..."), "the cut is marked at the front: {right:?}");
+        assert!(right.ends_with("xxxx"), "the tail you are typing stays visible");
+        assert!(left.starts_with("[command]"));
+        assert!(
+            Canvas::text_width(&left, 1) + GLYPH_ADVANCE + Canvas::text_width(&right, 1) <= 200
+        );
+    }
+
+    #[test]
+    fn short_status_is_left_untouched() {
+        let (left, right) = fit_segments("[normal] hi", "https://a/", 1000, 1, false);
+        assert_eq!(left, "[normal] hi");
+        assert_eq!(right, "https://a/");
     }
 
     #[test]

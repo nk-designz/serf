@@ -17,6 +17,7 @@ use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key as WinitKey, ModifiersState, NamedKey};
+use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::window::{Fullscreen, Window, WindowId};
 
 use serf::adblock::AdblockEngine;
@@ -843,7 +844,14 @@ impl ApplicationHandler<UserEvent> for App {
         if self.window.is_some() {
             return;
         }
-        let window = match event_loop.create_window(Window::default_attributes().with_title("serf")) {
+        let window = match event_loop.create_window(
+            Window::default_attributes()
+                .with_title("serf")
+                // Wayland app_id. Without it the toplevel has no application id
+                // at all — mango labelled the window `broken` — so compositor
+                // rules, taskbars and screen shares cannot match serf.
+                .with_name("serf", "serf"),
+        ) {
             Ok(w) => w,
             Err(e) => {
                 log::error!("serf: cannot create a window: {e}");
