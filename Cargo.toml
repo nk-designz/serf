@@ -1,0 +1,65 @@
+[package]
+name = "serf"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "serf — a suckless, keyboard-driven Servo browser for Wayland"
+license = "MIT"
+repository = "https://example.invalid/serf"
+default-run = "serf"
+
+[lib]
+name = "serf"
+path = "src/lib.rs"
+
+[[bin]]
+name = "serf"
+path = "src/main.rs"
+
+[[bin]]
+name = "serf-msg"
+path = "src/bin/serf-msg.rs"
+
+[features]
+default = []
+# The Servo engine backend. Off by default because pulling it in requires
+# building SpiderMonkey (mozjs_sys) from source — see README / BUILD notes.
+servo = ["dep:servo", "dep:euclid", "dep:url", "dep:webrender_api", "dep:tracing"]
+
+[dependencies]
+# --- Wayland-only windowing: no GTK, no Qt, no X11 ---
+winit = { version = "0.30", default-features = false, features = ["wayland", "rwh_06"] }
+# Raw Wayland client for the wlr-layer-shell status overlay (no toolkit layer,
+# in the spirit of the suckless tools serf is modelled on).
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+
+# --- Adblocking engine ---
+adblock = "0.13"
+memmap2 = "0.9"
+
+# --- Config / IPC / hot reload ---
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+serde_json = "1"
+notify = "8"
+
+# --- Allocator / logging / errors ---
+mimalloc = { version = "0.1", default-features = false }
+log = "0.4"
+env_logger = "0.11"
+anyhow = "1"
+thiserror = "2"
+
+# --- Servo embedding backend (feature = "servo") ---
+servo = { version = "0.7", optional = true }
+euclid = { version = "0.22", optional = true }
+url = { version = "2", optional = true }
+webrender_api = { version = "0.70", optional = true }
+tracing = { version = "0.1", optional = true }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+opt-level = 3

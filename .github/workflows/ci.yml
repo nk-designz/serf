@@ -1,0 +1,93 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Fast signal on every push: everything except the web engine.
+  default:
+    name: default build + tests (no Servo)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libfontconfig1-dev libfreetype6-dev \
+            libxkbcommon-dev libwayland-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo check
+        run: cargo check --all-targets --locked
+      - name: cargo test
+        run: cargo test --locked
+
+  # The heavy one: the real Servo engine. Builds SpiderMonkey (mozjs_sys)
+  # from source, which is why this runs natively on aarch64 with a 6 hour
+  # budget and a warm cache rather than on the Pinebook Pro.
+  servo:
+    name: servo build (aarch64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 360
+    # ARM runners are not available on every plan / for private repos, so this
+    # job stays parked until the repo variable SERVO_RUNNERS is set to
+    # "enabled" (or you dispatch it manually). That keeps CI green out of the
+    # box while leaving the heavy build one switch away.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      vars.SERVO_RUNNERS == 'enabled'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SpiderMonkey build toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang cmake python3 make automake autoconf \
+            pkg-config libfontconfig1-dev libfreetype6-dev \
+            libxkbcommon-dev libwayland-dev libssl-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # The mozjs compile is the expensive part; keep the cache warm and
+      # keyed to the Servo feature so it is not evicted by the default job.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: servo-arm64
+          cache-targets: true
+
+      - name: Confirm the target flags reached the build
+        run: |
+          echo "arch: $(uname -m), cores: $(nproc), mem: $(free -h | awk '/^Mem:/{print $2}')"
+          grep -A4 'target.aarch64' .cargo/config.toml
+
+      - name: Build with the Servo engine
+        run: cargo build --release --features servo --locked -j "$(nproc)"
+
+      - name: Unit tests with the Servo engine
+        run: cargo test --release --features servo --locked -j "$(nproc)" --lib
+
+      - name: Report the artifact
+        run: |
+          ls -lh target/release/serf target/release/serf-msg
+          file target/release/serf
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: serf-aarch64-servo
+          path: |
+            target/release/serf
+            target/release/serf-msg
+          if-no-files-found: error

@@ -1,0 +1,93 @@
+# serf configuration — copy to ~/.config/serf/config.toml
+# Hot-reloaded at runtime: edits apply without restarting.
+
+[general]
+homepage = "about:blank"
+# Where serf advertises its IPC socket for serf-msg.
+socket_path = "/tmp/serf.sock"
+# Launch external fuzzy launchers for tab / history selection.
+tab_launcher = "fuzzel --dmenu"
+# Commands run when `o` (open) is pressed with an empty prompt, if set.
+search_engine = "https://duckduckgo.com/?q=%s"
+# "normal" is the default modality (surf-style: no persistent chrome).
+start_mode = "normal"
+
+[adblock]
+enabled = true
+# Filter lists. Plain text lists (EasyList syntax) or a prebuilt serialized
+# cache produced by `serf --build-adblock-cache`.
+lists = [
+    "~/.local/share/serf/filters/easylist.txt",
+]
+# Memory-mapped serialized engine. When present, serf mmaps it instead of
+# re-parsing the text lists — this is what keeps adblock RAM under ~15 MB.
+cache = "~/.local/share/serf/filters/engine.dat"
+# Cosmetic filtering: inject `display:none` CSS for matched selectors.
+cosmetic = true
+# Tags understood by uBlock-style `[$tag]` rules.
+tags = ["serf", "linux"]
+
+[theme]
+# "pywal" reads ~/.cache/wal/colors.json; "catppuccin" uses a builtin;
+# "static" uses the [colors] block below.
+source = "catppuccin"
+catppuccin_flavour = "mocha"
+# Palette injected into pages as a user agent stylesheet (per-domain below).
+inject_css = true
+
+[colors]
+# Used when theme.source = "static".
+background = "#1e1e2e"
+foreground = "#cdd6f4"
+accent = "#89b4fa"
+dim = "#6c7086"
+alert = "#f38ba8"
+
+# Overlay status line appearance.
+[overlay]
+height = 22
+font_scale = 1
+position = "bottom"
+# Show the URL of links under the cursor / after `f` hint activation.
+show_url_on_hover = true
+
+# Per-domain rules. `hide` entries are extra cosmetic selectors.
+[domains."news.ycombinator.com"]
+zoom = 1.15
+
+[domains."example.com"]
+hide = ["#cookie-banner", ".newsletter-modal"]
+zoom = 1.0
+
+# Keybindings: chord -> action. Chords are space-separated key sequences.
+[keybindings.normal]
+"j" = "scroll-down"
+"k" = "scroll-up"
+"h" = "scroll-left"
+"l" = "scroll-right"
+"d" = "half-page-down"
+"u" = "half-page-up"
+"g g" = "scroll-top"
+"G" = "scroll-bottom"
+"f" = "hint"
+"F" = "hint-new-tab"
+"o" = "open-prompt"
+"O" = "open-prompt-edit"
+"H" = "history-back"
+"L" = "history-forward"
+"r" = "reload"
+"J" = "tab-prev"
+"K" = "tab-next"
+"d d" = "tab-close"
+"i" = "enter-insert"
+":" = "enter-command"
+"/" = "search"
+"y" = "yank-url"
+"p" = "paste-open"
+
+[keybindings.insert]
+"<Escape>" = "enter-normal"
+
+[keybindings.command]
+"<Escape>" = "enter-normal"
+"<Enter>" = "command-submit"

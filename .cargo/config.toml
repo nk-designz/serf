@@ -1,0 +1,21 @@
+# serf build configuration — ARM64 / Pinebook Pro (RK3399) tuning.
+#
+# The RK3399 is big.LITTLE: 2x Cortex-A72 + 4x Cortex-A53. Both clusters
+# implement ARMv8-A with NEON (ASIMD), so codegen for the A72 big core is
+# ISA-compatible with the A53 little cores — the scheduler may place any
+# thread on either cluster. We therefore target the big core for scheduling
+# quality but deliberately do NOT enable every optional A72 feature
+# (e.g. +crypto/+sha) because those are optional in ARMv8-A and are not
+# guaranteed present on the A53 side of this SoC.
+[target.aarch64-unknown-linux-gnu]
+rustflags = [
+    "-C", "target-cpu=cortex-a72",
+    "-C", "target-feature=+neon",
+]
+
+[build]
+# Keep jobs low on the 4 GB Pinebook Pro; override with CARGO_BUILD_JOBS.
+jobs = 2
+
+[net]
+retry = 3
