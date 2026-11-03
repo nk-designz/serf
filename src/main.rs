@@ -50,6 +50,14 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 enum UserEvent {
     /// An effect produced by a `serf-msg` command.
     Effect(Box<Effect>),
+    /// Servo has work for the loop — a script message, or a frame that is ready to
+    /// paint. It carries nothing: the work lives in Servo, and `App::user_event`
+    /// spins it. This is the variant `ServoWaker` sends, and it exists because a
+    /// wake that does not reach winit is a wake that never happened.
+    ///
+    /// Only the servo build has a waker to send it, so only the servo build has it.
+    #[cfg(feature = "servo")]
+    Wake,
 }
 
 /// State shared between the main thread and the IPC/overlay threads.
@@ -206,6 +214,7 @@ fn main() -> Result<()> {
         page_focused: false,
         launcher: None,
         menu_purpose: None,
+        wake: proxy.clone(),
     };
 
     event_loop.run_app(&mut app).context("running the winit event loop")?;
@@ -308,6 +317,10 @@ struct App {
     launcher: Option<Launcher>,
     /// What that menu is choosing, so its answer can be applied.
     menu_purpose: Option<MenuPurpose>,
+    /// The winit wake handle, held so the Servo backend can be handed a waker that
+    /// actually wakes this loop (see `ServoWaker`). Servo calls `wake` from its own
+    /// threads, so this has to be the `Send + Sync` proxy and not the loop itself.
+    wake: EventLoopProxy<UserEvent>,
 }
 
 /// What a running external menu is for.
@@ -838,7 +851,7 @@ impl ApplicationHandler<UserEvent> for App {
             .map(|c| c.general.homepage.clone())
             .unwrap_or_else(|_| "about:blank".into());
 
-        match create_engine(&homepage, Some(&window)) {
+        match create_engine(&homepage, Some(&window), self.wake.clone()) {
             Ok(engine) => self.engine = Some(engine),
             Err(e) => {
                 log::error!("serf: engine init failed: {e}");
@@ -848,6 +861,12 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(engine) = self.engine.as_mut() {
             engine.inject_css(&self.theme.page_stylesheet());
         }
+        // Ask for the first frame. A Wayland toplevel is created by `create_window`
+        // but stays unmapped until a buffer is committed, and the commit happens on
+        // `RedrawRequested`; Servo's own frame-ready wake drives every frame after
+        // this one (`ServoWaker`), but the first request has no prior event to hang
+        // off, so it is made here.
+        window.request_redraw();
         self.window = Some(window);
         self.sync_status();
     }
@@ -858,6 +877,14 @@ impl ApplicationHandler<UserEvent> for App {
         }
         match event {
             UserEvent::Effect(effect) => self.apply_effect(*effect),
+            // A wake is Servo saying there is work for it: `spin` above delivers that
+            // work — a ready frame lands in the delegate's dirty flag — and
+            // `poll_engine` turns it into a repaint request here and now, rather than
+            // leaving it to the turn's own `about_to_wait`. The frame is the reason
+            // we were woken, so it should not depend on which order winit happens to
+            // run its hooks in.
+            #[cfg(feature = "servo")]
+            UserEvent::Wake => self.poll_engine(),
         }
     }
 
@@ -961,7 +988,15 @@ impl ApplicationHandler<UserEvent> for App {
 /// Without the `servo` feature this is the [`StubEngine`]; with it, a real
 /// Servo `WebView` is attached to the window's raw handles exactly as Servo's
 /// own `examples/winit_minimal.rs` does.
-fn create_engine(homepage: &str, window: Option<&Window>) -> Result<Box<dyn Engine>> {
+///
+/// `wake` is the event loop's cross-thread handle, and the servo branch hands it to
+/// Servo as its [`ServoWaker`] — without it Servo's frame-ready notifications never
+/// reach the loop and nothing ever paints (see that struct).
+fn create_engine(
+    homepage: &str,
+    window: Option<&Window>,
+    wake: EventLoopProxy<UserEvent>,
+) -> Result<Box<dyn Engine>> {
     #[cfg(feature = "servo")]
     {
         use serf::browser::engine::servo_backend::ServoEngine;
@@ -984,7 +1019,7 @@ fn create_engine(homepage: &str, window: Option<&Window>) -> Result<Box<dyn Engi
         let _ = context.make_current();
 
         let servo = servo::ServoBuilder::default()
-            .event_loop_waker(Box::new(ServoWaker))
+            .event_loop_waker(Box::new(ServoWaker::new(wake)))
             .build();
         servo.setup_logging();
 
@@ -995,15 +1030,39 @@ fn create_engine(homepage: &str, window: Option<&Window>) -> Result<Box<dyn Engi
     }
     #[cfg(not(feature = "servo"))]
     {
-        let _ = window;
+        // The stub engine paints nothing, so neither the window nor the wake handle
+        // is needed here.
+        let _ = (window, wake);
         Ok(Box::new(StubEngine::new(homepage)))
     }
 }
 
-/// Servo's wake handle. In the default build there is nothing to wake.
+/// Servo's wake handle.
+///
+/// **Servo calls this from its own threads when it has work for the embedder**, and
+/// a frame that is ready to paint is one of those times. It must therefore reach
+/// winit: the loop blocks in its platform wait when the event queue is empty, and a
+/// wake that only sets a flag (which is what this did — the body was a comment)
+/// leaves that flag unread. The delegate's `notify_new_frame_ready` records
+/// `DelegateState::dirty`, and a loop turn is what drains it, so with no wake
+/// there is no turn: no `RedrawRequested`, no committed buffer, and the
+/// Wayland toplevel is created but never mapped. That was the whole of the
+/// "nothing paints" failure — the page had loaded and WebRender had initialized.
 #[cfg(feature = "servo")]
 #[derive(Clone)]
-struct ServoWaker;
+struct ServoWaker {
+    /// winit's own cross-thread handle. It is `Send + Sync` and `send_event` is
+    /// legal from any thread, which is what `EventLoopWaker` requires; Servo's own
+    /// `examples/winit_minimal.rs` passes its event-loop proxy the same way.
+    proxy: EventLoopProxy<UserEvent>,
+}
+
+#[cfg(feature = "servo")]
+impl ServoWaker {
+    fn new(proxy: EventLoopProxy<UserEvent>) -> Self {
+        Self { proxy }
+    }
+}
 
 #[cfg(feature = "servo")]
 impl servo::EventLoopWaker for ServoWaker {
@@ -1011,7 +1070,11 @@ impl servo::EventLoopWaker for ServoWaker {
         Box::new(self.clone())
     }
     fn wake(&self) {
-        // `App::user_event` calls `engine.spin()`, which drives Servo.
+        if let Err(e) = self.proxy.send_event(UserEvent::Wake) {
+            // The loop is gone, which happens on the way out of `run_app`; there is
+            // nothing left to wake and nothing to report to.
+            log::debug!("serf: cannot wake the event loop: {e}");
+        }
     }
 }
 
