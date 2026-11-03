@@ -686,6 +686,11 @@ impl App {
                 if let Some(engine) = self.engine.as_mut() {
                     engine.save_session();
                 }
+                // Drop the engine before exiting: `process::exit` runs no
+                // destructors, and Servo flushes `localStorage`/IndexedDB from
+                // its storage threads' shutdown path. Exiting without this
+                // loses whatever the session wrote since the last flush.
+                drop(self.engine.take());
                 std::process::exit(0)
             }
             Effect::None => {}

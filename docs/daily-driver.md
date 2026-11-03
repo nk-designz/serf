@@ -108,8 +108,16 @@ own scroll model. Also relevant: `adjust_pinch_zoom` and `set_page_zoom`
 
 - `ClipboardDelegate` (separate trait; the `clipboard` cargo feature is on by
   default) — copy/paste.
-- Session persistence: cookies, `localStorage`, `IndexedDB` across restarts
-  (`SiteDataManager`). Without it every site forgets you on every launch.
+- Session persistence — **done**, with one caveat. `ServoBuilder::opts` carries
+  a `config_dir` (`~/.local/share/serf/servo`), which is what makes Servo's
+  storage threads write `localStorage`, IndexedDB and cache storage to disk;
+  without it they are memory-only. Cookies are *not* covered by that: Servo 0.7's
+  cookie jar (`net::cookie_storage`) has no disk backing at all, so `serf` saves
+  and restores it itself in `browser/cookies.rs` via
+  `SiteDataManager::cookies_for_url` / `set_cookie_for_url`, writing
+  `~/.local/share/serf/cookies.json` (0600, atomic rename, persistent cookies
+  only). Verified by a local page that reports a `localStorage` counter and
+  `document.cookie` across a restart.
 - Downloads and uploads.
 
 ---
