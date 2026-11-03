@@ -332,6 +332,11 @@ impl VimState {
         self.pending.clear();
     }
 
+    /// Enter a mode without a keybinding (e.g. pointer click into page content).
+    pub fn enter_mode(&mut self, mode: Mode) {
+        self.apply(Action::EnterMode(mode));
+    }
+
     /// Feed one key and get the resulting action, if any.
     pub fn feed(&mut self, key: Key) -> Action {
         match self.mode {
@@ -500,6 +505,15 @@ mod tests {
         assert_eq!(s.feed(ch('x')), Action::PassThrough);
         assert_eq!(s.feed(Key::Escape), Action::EnterMode(Mode::Normal));
         assert_eq!(s.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn page_click_switches_to_insert_so_a_clicked_field_can_type() {
+        let mut s = state();
+        s.enter_mode(Mode::Insert);
+        assert_eq!(s.mode, Mode::Insert);
+        assert_eq!(s.feed(ch('t')), Action::PassThrough);
+        assert_eq!(s.feed(Key::Escape), Action::EnterMode(Mode::Normal));
     }
 
     #[test]

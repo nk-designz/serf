@@ -156,8 +156,8 @@ pub trait Engine {
         None
     }
 
-    /// Tell the page whether it has keyboard focus. serf blurs the page in
-    /// NORMAL mode so vim keys never leak into a text field.
+    /// Tell Servo whether the containing OS window has system focus. Keyboard
+    /// forwarding is controlled separately by the embedder's modal keymap.
     fn set_focused(&mut self, _focused: bool) {}
 
     /// Forward a mouse button at viewport coordinates (device pixels).

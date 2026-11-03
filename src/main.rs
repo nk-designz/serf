@@ -223,7 +223,6 @@ fn main() -> Result<()> {
         config_path,
         modifiers: ModifiersState::empty(),
         pointer: (0.0, 0.0),
-        page_focused: false,
         launcher: None,
         menu_purpose: None,
         wake: proxy.clone(),
@@ -322,9 +321,6 @@ struct App {
     /// Where the pointer was last seen, in device pixels — the origin a click or
     /// a scroll is resolved against.
     pointer: (f64, f64),
-    /// Whether the page currently owns the keyboard. Reconciled against the vim
-    /// mode every turn, because an `<input>` must not receive NORMAL-mode keys.
-    page_focused: bool,
     /// A running external menu, if one is open.
     launcher: Option<Launcher>,
     /// What that menu is choosing, so its answer can be applied.
@@ -415,15 +411,6 @@ impl App {
             if self.menu_purpose.is_none() {
                 let entries = control_entries(&request);
                 self.start_menu(MenuPurpose::Control(request), entries);
-            }
-        }
-
-        // INSERT is the only mode where the page should own the keyboard.
-        let want_focus = self.vim.mode == Mode::Insert;
-        if self.page_focused != want_focus {
-            self.page_focused = want_focus;
-            if let Some(engine) = self.engine.as_mut() {
-                engine.set_focused(want_focus);
             }
         }
 
@@ -929,6 +916,14 @@ impl ApplicationHandler<UserEvent> for App {
                     engine.resize(size.width, size.height);
                 }
             }
+            // Servo's focus flag is SYSTEM focus, not vim INSERT mode. Clearing
+            // it in NORMAL prevented clicks from focusing form controls at all.
+            // The keymap already keeps NORMAL/COMMAND keys away from the page.
+            WindowEvent::Focused(focused) => {
+                if let Some(engine) = self.engine.as_mut() {
+                    engine.set_focused(focused);
+                }
+            }
             WindowEvent::ModifiersChanged(modifiers) => {
                 // The keymap resolves `<C-d>`-style chords from this, so a stale
                 // value silently disables every modified binding.
@@ -947,8 +942,8 @@ impl ApplicationHandler<UserEvent> for App {
                         Some(action) if action != Action::PassThrough => self.apply_action(action),
                         // INSERT: the page owns the keyboard, so an unbound key —
                         // and any key serf cannot name, like an arrow — is typed
-                        // into it. In NORMAL/COMMAND the page is not focused, so
-                        // an unbound key is simply dropped.
+                        // into it. In NORMAL/COMMAND an unbound key is dropped;
+                        // system focus remains with the page for pointer interaction.
                         _ if self.vim.mode == Mode::Insert => self.forward_key(&event),
                         _ => {}
                     }
@@ -965,6 +960,13 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::MouseInput { state, button, .. } => {
                 let down = state == ElementState::Pressed;
                 let primary = button == MouseButton::Left;
+                if primary && down {
+                    // Clicking a field is an explicit request to type into the
+                    // page; Esc restores NORMAL. Do not conflate this with
+                    // WebView system focus, which follows WindowEvent::Focused.
+                    self.vim.enter_mode(Mode::Insert);
+                    self.sync_status();
+                }
                 let (x, y) = self.pointer;
                 if let Some(engine) = self.engine.as_mut() {
                     engine.send_mouse_button(down, primary, x, y);
