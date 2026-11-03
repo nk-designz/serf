@@ -57,9 +57,19 @@ serf/
 
 * **Engine-level adblocking.** `adblock/mod.rs` wraps the same `adblock-rust`
   engine Brave ships. `check()` is the network hook (block / redirect /
-  rewrite / CSP); `cosmetic_css()` is the layout hook. Filter lists are
-  compiled once and **memory-mapped** (`from_cache`) instead of re-parsed,
-  which is what keeps the adblock footprint small.
+  rewrite / CSP) and is called from `WebViewDelegate::load_web_resource`, where
+  a blocking decision cancels the request before it hits the network;
+  `cosmetic_css()` is the layout hook that hides whatever is left. Requests are
+  classified from `Sec-Fetch-Dest` (falling back to the URL's extension), so
+  `$script`/`$image`/`$subdocument` rules match what they were written for.
+  Filter lists are compiled once and **memory-mapped** (`from_cache`) instead of
+  re-parsed, which is what keeps the adblock footprint small.
+
+* **Trackpad gestures.** Two-finger horizontal swipes navigate while `Ctrl` is
+  held: left/right is history back/forward, and `Ctrl+Shift` makes the same
+  swipe move between tabs. A touchpad reports a stream of axis deltas rather than
+  a discrete gesture, so `input/gesture.rs` accumulates travel until it crosses a
+  threshold and then holds a cooldown — one swipe, one action.
 
 * **Hot-reloadable config.** `config::spawn_watcher` watches the config with
   `notify` and swaps a new `Config` into an `Arc<RwLock<_>>` — no restart.
