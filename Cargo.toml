@@ -24,7 +24,7 @@ path = "src/bin/serf-msg.rs"
 default = []
 # The Servo engine backend. Off by default because pulling it in requires
 # building SpiderMonkey (mozjs_sys) from source — see README / BUILD notes.
-servo = ["dep:servo", "dep:euclid", "dep:url", "dep:webrender_api", "dep:tracing", "dep:pkcs1"]
+servo = [ "dep:servo", "dep:euclid", "dep:url", "dep:webrender_api", "dep:tracing", "dep:pkcs1", "dep:keyboard-types" ]
 
 [dependencies]
 # --- Wayland-only windowing: no GTK, no Qt, no X11 ---
@@ -56,9 +56,6 @@ thiserror = "2"
 # NOT include default_web_features, so a bare dependency silently ships with no
 # WebGL and no brotli. Enable the subset that resolves and that this hardware
 # can actually use. Deliberately omitted:
-#   webcrypto — pulls aes-kw = "^0.3", which crates.io cannot satisfy any more
-#               (only 0.3.0-rc.* prereleases exist, and ^0.3 rejects prereleases
-#               by default), so enabling it makes the servo tree unresolvable.
 #   webgpu    — Mali-T860 (Midgard v5) has no Vulkan; PanVK is Bifrost v6+ only.
 #   webxr     — no XR hardware.
 servo = { version = "0.7", optional = true, features = [
@@ -67,17 +64,30 @@ servo = { version = "0.7", optional = true, features = [
     "webcrypto",
     "media-gstreamer",
 ] }
-# servo-script pins `rsa = "=0.10.0-rc.18"`, which declares `pkcs1 = "^0.8.0-rc.4"`
-# but is written against the rc API, where `RsaPrivateKey` carried a lifetime.
-# Cargo legitimately prefers the FINAL `pkcs1 0.8.0`, where that type instead
-# takes a generic `U` — and the rsa rc then fails to compile (E0107, 8 errors).
-# Pinning pkcs1 to the rc keeps the pair consistent. Verified locally: rsa
-# 0.10.0-rc.18 compiles clean against pkcs1 0.8.0-rc.5.
-pkcs1 = { version = "=0.8.0-rc.5", optional = true }
+# servo-script pins `rsa = "=0.10.0-rc.18"`, whose pkcs1 interop is written
+# against `pkcs1::RsaPrivateKey<'a>` — the type took a LIFETIME in that series:
+#
+#   rsa-0.10.0-rc.18/src/encoding.rs:41
+#     impl TryFrom<pkcs1::RsaPrivateKey<'_>> for RsaPrivateKey {
+#
+# `pkcs1 = "0.8.0-rc.4"` in rsa's manifest is a `^` range, so cargo legitimately
+# resolves to the highest match. That order matters: 0.8.0-rc.4 has the lifetime,
+# but rc.5 and the final 0.8.0 both changed the type to a generic `U`
+# (`pub struct RsaPrivateKey<U>`), which no longer satisfies rsa rc.18 — 8 ×
+# E0107, "struct takes 1 generic argument but 0 were supplied".
+#
+# So the pin has to be rc.4 exactly. NOT rc.5 and NOT the 0.8.0 release: those
+# are the versions that break. rc.4 is on crates.io and unyanked.
+pkcs1 = { version = "=0.8.0-rc.4", optional = true }
 euclid = { version = "0.22", optional = true }
 url = { version = "2", optional = true }
 webrender_api = { version = "0.70", optional = true }
 tracing = { version = "0.1", optional = true }
+# Servo re-exports most of `keyboard_types`, but not `KeyboardEvent` itself —
+# and `InputEvent::Keyboard` needs one. Pinned to the version servo requires so
+# cargo unifies the two into a single crate and `servo::Key` stays the same type
+# as the one in the event serf builds.
+keyboard-types = { version = "0.8.3", optional = true }
 
 [profile.release]
 lto = "thin"

@@ -79,6 +79,9 @@ zoom = 1.0
 "J" = "tab-prev"
 "K" = "tab-next"
 "d d" = "tab-close"
+"t" = "tab-new"
+# The tab list (and every page form control) goes to the external `tab_launcher`.
+"T" = "tab-menu"
 "i" = "enter-insert"
 ":" = "enter-command"
 "/" = "search"

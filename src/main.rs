@@ -14,13 +14,16 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, KeyEvent, WindowEvent};
+use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key as WinitKey, ModifiersState, NamedKey};
-use winit::window::{Window, WindowId};
+use winit::window::{Fullscreen, Window, WindowId};
 
 use serf::adblock::AdblockEngine;
-use serf::browser::engine::{Engine, LinkSink, StubEngine};
+use serf::browser::engine::{
+    ControlChoice, ControlRequest, Engine, LinkSink, PageKey, PageState, StubEngine,
+};
+use serf::browser::launcher::Launcher;
 use serf::browser::navigation::{Command, Effect, Session};
 use serf::config::{self, Config, SharedConfig};
 use serf::input::hints::{HintOutcome, HintSession, LinkBox};
@@ -188,6 +191,11 @@ fn main() -> Result<()> {
         theme,
         adblock,
         config_path,
+        modifiers: ModifiersState::empty(),
+        pointer: (0.0, 0.0),
+        page_focused: false,
+        launcher: None,
+        menu_purpose: None,
     };
 
     event_loop.run_app(&mut app).context("running the winit event loop")?;
@@ -277,7 +285,35 @@ struct App {
     /// Main-thread-only: `adblock::Engine` is not `Send`.
     adblock: Option<AdblockEngine>,
     config_path: PathBuf,
+    /// Live modifier state. serf's keymap needs it to resolve `<C-d>`-style
+    /// chords, and the page needs it on every forwarded key.
+    modifiers: ModifiersState,
+    /// Where the pointer was last seen, in device pixels — the origin a click or
+    /// a scroll is resolved against.
+    pointer: (f64, f64),
+    /// Whether the page currently owns the keyboard. Reconciled against the vim
+    /// mode every turn, because an `<input>` must not receive NORMAL-mode keys.
+    page_focused: bool,
+    /// A running external menu, if one is open.
+    launcher: Option<Launcher>,
+    /// What that menu is choosing, so its answer can be applied.
+    menu_purpose: Option<MenuPurpose>,
 }
+
+/// What a running external menu is for.
+#[derive(Debug, Clone, PartialEq)]
+enum MenuPurpose {
+    /// A tab, chosen by index.
+    Tab,
+    /// A form control the page is blocked on.
+    Control(ControlRequest),
+}
+
+/// How much a wheel "line" is worth in device pixels. winit reports a discrete
+/// wheel as lines and a trackpad as pixels; Servo takes pixels, so the discrete
+/// case has to be scaled. 50 is the browser-typical step and matches what the
+/// `j`/`k` scroll distance already feels like.
+const PIXELS_PER_WHEEL_LINE: f64 = 50.0;
 
 impl App {
     fn sync_status(&self) {
@@ -290,6 +326,256 @@ impl App {
             pending: self.vim.pending_display(),
             message: self.vim.command_line().to_string(),
         });
+    }
+
+    // --- the page's side of the loop -------------------------------------
+
+    /// Bring the model, the overlay and the window in line with everything the
+    /// engine reported since the last turn.
+    ///
+    /// The delegate runs on Servo's threads and only records; this is where the
+    /// records become actions. Everything is collected before anything is acted
+    /// on, because acting borrows `self` mutably — the engine borrow has to end
+    /// first.
+    fn poll_engine(&mut self) {
+        let (control, new_tabs, state, repaint, key_handled) = {
+            let Some(engine) = self.engine.as_mut() else {
+                return;
+            };
+            (
+                engine.pending_control(),
+                engine.take_new_tabs(),
+                engine.take_page_state(),
+                engine.wants_repaint(),
+                engine.last_key_handled(),
+            )
+        };
+
+        if repaint {
+            if let Some(window) = self.window.as_ref() {
+                window.request_redraw();
+            }
+        }
+
+        for url in new_tabs {
+            log::info!("serf: the page opened a new tab: {url}");
+            let effect = self
+                .shared
+                .session
+                .lock()
+                .unwrap()
+                .apply(Command::OpenNewTab(url));
+            self.apply_effect(effect);
+        }
+
+        if let Some(state) = state {
+            self.apply_page_state(&state);
+        }
+
+        // A control blocks the page until it is answered, so open the menu for
+        // it — unless one is already open.
+        if let Some(request) = control {
+            if self.menu_purpose.is_none() {
+                let entries = control_entries(&request);
+                self.start_menu(MenuPurpose::Control(request), entries);
+            }
+        }
+
+        // INSERT is the only mode where the page should own the keyboard.
+        let want_focus = self.vim.mode == Mode::Insert;
+        if self.page_focused != want_focus {
+            self.page_focused = want_focus;
+            if let Some(engine) = self.engine.as_mut() {
+                engine.set_focused(want_focus);
+            }
+        }
+
+        if let Some(handled) = key_handled {
+            log::debug!(
+                "serf: the page {} the last key",
+                if handled { "took" } else { "ignored" }
+            );
+        }
+    }
+
+    /// Fold what the page reported into the tab model.
+    fn apply_page_state(&mut self, state: &PageState) {
+        for line in &state.console {
+            log::info!("serf: console: {line}");
+        }
+
+        if let Some(reason) = state.crashed.as_ref() {
+            log::error!("serf: the page crashed: {reason}");
+            // The viewport is dead, so the bar is the only place left to say so.
+            self.shared.session.lock().unwrap().current_mut().title = "⚠ crashed".into();
+        }
+
+        if let Some(fullscreen) = state.fullscreen {
+            // A page asking for fullscreen is honoured: a video that cannot go
+            // fullscreen is the one thing that would make this browser useless
+            // for media.
+            if let Some(window) = self.window.as_ref() {
+                window.set_fullscreen(fullscreen.then_some(Fullscreen::Borderless(None)));
+            }
+        }
+
+        if state.url.is_some() || state.title.is_some() {
+            let mut session = self.shared.session.lock().unwrap();
+            let tab = session.current_mut();
+            // The engine is the authority on what is on screen, and its own
+            // back/forward list is the real history. serf's per-tab history is a
+            // convenience for the launcher, so a page-driven URL change updates
+            // the current entry rather than pushing a second one for a
+            // navigation serf already recorded.
+            if let Some(url) = state.url.as_ref() {
+                tab.replace(url.clone());
+            }
+            if let Some(title) = state.title.as_ref() {
+                tab.title = title.clone();
+            }
+        }
+
+        if let Some(loading) = state.loading {
+            log::debug!("serf: {}", if loading { "loading" } else { "load complete" });
+        }
+
+        if state.url.is_some() || state.title.is_some() || state.loading.is_some() {
+            self.sync_status();
+        }
+    }
+
+    /// Open the external launcher on the tab list (`T`, or the `tab-menu` action).
+    fn open_tab_menu(&mut self) {
+        let entries = self.shared.session.lock().unwrap().launcher_entries();
+        self.start_menu(MenuPurpose::Tab, entries);
+    }
+
+    /// Run the configured `tab_launcher` over `entries`.
+    ///
+    /// The menu owns its own window (fuzzel, wofi, dmenu), so it is not an
+    /// overlay serf draws: that is what keeps serf chrome-free and out of the
+    /// toolkit business.
+    fn start_menu(&mut self, purpose: MenuPurpose, entries: String) {
+        let command = self
+            .shared
+            .config
+            .read()
+            .map(|c| c.general.tab_launcher.clone())
+            .unwrap_or_default();
+        if command.trim().is_empty() {
+            log::warn!("serf: no tab_launcher is configured, so no menu is available");
+            return;
+        }
+        match Launcher::spawn(&command, &entries) {
+            Ok(launcher) => {
+                self.launcher = Some(launcher);
+                self.menu_purpose = Some(purpose);
+            }
+            Err(e) => log::error!("serf: cannot run the launcher {command:?}: {e}"),
+        }
+    }
+
+    /// Apply the running menu's answer once it closes.
+    fn poll_menu(&mut self) {
+        let answer = match self.launcher.as_ref() {
+            Some(launcher) => launcher.poll(),
+            None => return,
+        };
+        // `None` means the menu is still open; `Some(None)` is a cancel.
+        let Some(answer) = answer else {
+            return;
+        };
+        self.launcher = None;
+        let purpose = self.menu_purpose.take();
+
+        let Some(line) = answer else {
+            // A cancelled form control still has to be answered, or the page
+            // stays blocked on it forever.
+            if let Some(MenuPurpose::Control(_)) = purpose {
+                if let Some(engine) = self.engine.as_mut() {
+                    engine.resolve_control(ControlChoice::Dismissed);
+                }
+            }
+            return;
+        };
+
+        match purpose {
+            Some(MenuPurpose::Tab) => {
+                let chosen = self
+                    .shared
+                    .session
+                    .lock()
+                    .unwrap()
+                    .parse_launcher_choice(&line);
+                if let Some(index) = chosen {
+                    // Routed through `apply` like every other tab change, so the
+                    // engine is told to load what the bar now claims is active.
+                    let effect = self
+                        .shared
+                        .session
+                        .lock()
+                        .unwrap()
+                        .apply(Command::Select(index));
+                    self.apply_effect(effect);
+                }
+            }
+            Some(MenuPurpose::Control(request)) => {
+                // Picking a directory out of a file listing descends into it
+                // instead of submitting it as the answer.
+                if let ControlRequest::File { .. } = request {
+                    let path = line.trim();
+                    if path.ends_with('/') && std::path::Path::new(path).is_dir() {
+                        let entries = file_listing(path.trim_end_matches('/'));
+                        self.start_menu(MenuPurpose::Control(request.clone()), entries);
+                        return;
+                    }
+                }
+                let choice = control_choice(&request, line.trim());
+                if let Some(engine) = self.engine.as_mut() {
+                    engine.resolve_control(choice);
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// Hand a key to the page: INSERT mode, or a key the keymap does not claim.
+    fn forward_key(&mut self, event: &KeyEvent) {
+        let Some(key) = App::page_key(event, self.modifiers) else {
+            return;
+        };
+        if let Some(engine) = self.engine.as_mut() {
+            engine.send_key(&key);
+        }
+    }
+
+    /// Describe a winit key event in the engine's key vocabulary.
+    ///
+    /// Separate from [`App::translate`] on purpose: that one maps onto the *vim*
+    /// keymap and deliberately collapses everything it does not bind, while this
+    /// one has to preserve exactly what the page needs to see.
+    fn page_key(event: &KeyEvent, modifiers: ModifiersState) -> Option<PageKey> {
+        let base = PageKey {
+            character: None,
+            named: None,
+            ctrl: modifiers.contains(ModifiersState::CONTROL),
+            alt: modifiers.contains(ModifiersState::ALT),
+            shift: modifiers.contains(ModifiersState::SHIFT),
+            logo: modifiers.contains(ModifiersState::SUPER),
+            repeat: event.repeat,
+            release: event.state == ElementState::Released,
+        };
+        match &event.logical_key {
+            WinitKey::Character(text) => Some(PageKey {
+                character: Some(text.to_string()),
+                ..base
+            }),
+            WinitKey::Named(named) => Some(PageKey {
+                named: Some(named_key_name(*named)?.to_string()),
+                ..base
+            }),
+            _ => None,
+        }
     }
 
     fn apply_effect(&mut self, effect: Effect) {
@@ -437,6 +723,7 @@ impl App {
             Action::TabPrev => Some(Effect::None),
             Action::TabClose => Some(Effect::None),
             Action::TabNew => Some(Effect::None),
+            Action::TabMenu => Some(Effect::None),
             Action::YankUrl | Action::PasteOpen | Action::Search { .. } => Some(Effect::None),
             Action::Quit => Some(Effect::Quit),
             Action::EnterMode(_) | Action::None | Action::PassThrough => None,
@@ -482,14 +769,11 @@ impl App {
                 let e = self.shared.session.lock().unwrap().apply(Command::OpenNewTab(url));
                 self.apply_effect(e);
             }
+            Action::TabMenu => self.open_tab_menu(),
             Action::PassThrough => {
-                if let Some(engine) = self.engine.as_mut() {
-                    // Insert mode: the key belongs to the page. A full
-                    // implementation forwards the raw winit event; here the
-                    // engine contract takes the already-sent event.
-                    let _ = engine;
-                }
-                return;
+                // Unreachable from the event loop, which forwards page-owned keys
+                // itself (`App::forward_key`) before the action is applied. Kept
+                // so the action stays total.
             }
             _ => {}
         }
@@ -588,18 +872,77 @@ impl ApplicationHandler<UserEvent> for App {
                     engine.resize(size.width, size.height);
                 }
             }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                // The keymap resolves `<C-d>`-style chords from this, so a stale
+                // value silently disables every modified binding.
+                self.modifiers = modifiers.state();
+            }
             WindowEvent::KeyboardInput { event, .. } => {
-                if let Some(key) = App::translate(&event, ModifiersState::empty()) {
-                    if self.hints.is_some() {
+                if self.hints.is_some() {
+                    if let Some(key) = App::translate(&event, self.modifiers) {
                         self.handle_hint_key(key);
-                    } else {
-                        let action = self.vim.feed(key);
-                        self.apply_action(action);
                     }
+                } else {
+                    let action =
+                        App::translate(&event, self.modifiers).map(|key| self.vim.feed(key));
+                    match action {
+                        // The keymap claimed the key and has work to do.
+                        Some(action) if action != Action::PassThrough => self.apply_action(action),
+                        // INSERT: the page owns the keyboard, so an unbound key —
+                        // and any key serf cannot name, like an arrow — is typed
+                        // into it. In NORMAL/COMMAND the page is not focused, so
+                        // an unbound key is simply dropped.
+                        _ if self.vim.mode == Mode::Insert => self.forward_key(&event),
+                        _ => {}
+                    }
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                // Tracked even outside INSERT: Servo resolves a scroll against the
+                // element under the point, so the vim scroll keys need it too.
+                self.pointer = (position.x, position.y);
+                if let Some(engine) = self.engine.as_mut() {
+                    engine.send_mouse_move(position.x, position.y);
+                }
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                let down = state == ElementState::Pressed;
+                let primary = button == MouseButton::Left;
+                let (x, y) = self.pointer;
+                if let Some(engine) = self.engine.as_mut() {
+                    engine.send_mouse_button(down, primary, x, y);
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                // winit's positive `y` is "wheel up" and Servo's positive
+                // `WheelDelta.y` is "the view scrolls up", so the sign carries
+                // over unchanged. Only line deltas need scaling, and only because
+                // Servo is told they are pixels.
+                let (dx, dy) = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => (
+                        x as f64 * PIXELS_PER_WHEEL_LINE,
+                        y as f64 * PIXELS_PER_WHEEL_LINE,
+                    ),
+                    MouseScrollDelta::PixelDelta(position) => (position.x, position.y),
+                };
+                let (x, y) = self.pointer;
+                if let Some(engine) = self.engine.as_mut() {
+                    engine.send_wheel(dx, dy, x, y);
                 }
             }
             _ => {}
         }
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        // The turn hook. Both the menu and the engine are polled here rather than
+        // on a wake-only path, so a menu whose child exits while nothing else is
+        // happening still has its answer applied.
+        if let Some(engine) = self.engine.as_mut() {
+            engine.spin();
+        }
+        self.poll_menu();
+        self.poll_engine();
     }
 }
 
@@ -659,5 +1002,254 @@ impl servo::EventLoopWaker for ServoWaker {
     }
     fn wake(&self) {
         // `App::user_event` calls `engine.spin()`, which drives Servo.
+    }
+}
+
+/// The name serf's engine vocabulary uses for a winit named key.
+///
+/// `None` for anything without a mapping, so an unmappable key is dropped rather
+/// than sent to the page as a different one.
+fn named_key_name(named: NamedKey) -> Option<&'static str> {
+    Some(match named {
+        NamedKey::Enter => "Enter",
+        NamedKey::Escape => "Escape",
+        NamedKey::Backspace => "Backspace",
+        NamedKey::Tab => "Tab",
+        NamedKey::Delete => "Delete",
+        NamedKey::ArrowUp => "ArrowUp",
+        NamedKey::ArrowDown => "ArrowDown",
+        NamedKey::ArrowLeft => "ArrowLeft",
+        NamedKey::ArrowRight => "ArrowRight",
+        NamedKey::Home => "Home",
+        NamedKey::End => "End",
+        NamedKey::PageUp => "PageUp",
+        NamedKey::PageDown => "PageDown",
+        _ => return None,
+    })
+}
+
+/// The menu entries for a form control.
+///
+/// Every control is answered through the same external launcher: serf has no
+/// widgets, and a `<select>` or a context menu is, structurally, a pick-one list.
+/// Index-carrying entries are written `N: text` so the answer maps straight back
+/// onto the request, and the launcher's own filter is what makes a long list
+/// usable.
+fn control_entries(request: &ControlRequest) -> String {
+    match request {
+        ControlRequest::Select { options, .. } => options
+            .iter()
+            .enumerate()
+            .map(|(index, label)| format!("{index}: {label}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        ControlRequest::ContextMenu { items } => items
+            .iter()
+            .enumerate()
+            .map(|(index, label)| format!("{index}: {label}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        ControlRequest::Color { current } => {
+            // A colour really wants a value prompt, and the launcher is one: every
+            // dmenu-alike accepts a line that is not in the list, so any
+            // `#rrggbb` works. The entries are just common starting points, with
+            // the element's current value first.
+            let mut entries = Vec::new();
+            if let Some((r, g, b)) = current {
+                entries.push(format!("#{r:02x}{g:02x}{b:02x}"));
+            }
+            for preset in ["#000000", "#ffffff", "#e6d7bd", "#191210", "#cf6a4c", "#3b6ea5"] {
+                if !entries.iter().any(|e| e == preset) {
+                    entries.push(preset.to_string());
+                }
+            }
+            entries.join("\n")
+        }
+        // A file input needs an absolute path, and serf has no dialog toolkit.
+        // The launcher is the path prompt: picking a directory descends into it
+        // (see `App::poll_menu`), and typing a path reaches anywhere else.
+        ControlRequest::File { .. } => {
+            let start = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+            file_listing(&start)
+        }
+    }
+}
+
+/// Map the launcher's answer back onto the control that asked for it.
+///
+/// An answer that does not fit — a stale index, an unparsable line — becomes a
+/// dismissal rather than a wrong selection. The line is trimmed here so the
+/// function's own contract does not depend on the caller remembering to.
+fn control_choice(request: &ControlRequest, line: &str) -> ControlChoice {
+    let line = line.trim();
+    match request {
+        ControlRequest::Select { options, .. } => match leading_index(line) {
+            Some(index) if index < options.len() => ControlChoice::Selected(vec![index as u32]),
+            _ => ControlChoice::Dismissed,
+        },
+        ControlRequest::ContextMenu { items } => match leading_index(line) {
+            Some(index) if index < items.len() => ControlChoice::MenuItem(index as u32),
+            _ => ControlChoice::Dismissed,
+        },
+        // Left raw: the engine validates the value and reports a bad one as no
+        // colour at all, so a typo cannot silently become black.
+        ControlRequest::Color { .. } => ControlChoice::Color(line.to_string()),
+        ControlRequest::File { .. } => ControlChoice::Files(vec![line.to_string()]),
+    }
+}
+
+/// The `N:` prefix that index-carrying entries are written with.
+fn leading_index(line: &str) -> Option<usize> {
+    line.split(':').next()?.trim().parse().ok()
+}
+
+/// One line per entry in `dir`, directories first with a trailing `/`.
+///
+/// Hidden entries are skipped (nobody picks `.cache` out of a menu) and the list
+/// is capped, so opening a file input in a huge directory cannot flood the
+/// launcher.
+fn file_listing(dir: &str) -> String {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return String::new();
+    };
+    let mut dirs = Vec::new();
+    let mut files = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        if entry.path().is_dir() {
+            dirs.push(format!("{dir}/{name}/"));
+        } else {
+            files.push(format!("{dir}/{name}"));
+        }
+    }
+    dirs.sort();
+    files.sort();
+    dirs.into_iter()
+        .chain(files)
+        .take(200)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg(test)]
+mod menu_tests {
+    use super::*;
+
+    #[test]
+    fn leading_index_reads_the_entry_prefix() {
+        assert_eq!(leading_index("0: Alpha"), Some(0));
+        assert_eq!(leading_index("12: Zed"), Some(12));
+        assert_eq!(leading_index("  3 :spaced"), Some(3));
+        assert_eq!(leading_index("no prefix here"), None);
+        assert_eq!(leading_index(""), None);
+    }
+
+    #[test]
+    fn a_select_answer_maps_back_to_its_index() {
+        let request = ControlRequest::Select {
+            options: vec!["Alpha".into(), "Beta".into()],
+            size: None,
+        };
+        assert_eq!(
+            control_choice(&request, "1: Beta"),
+            ControlChoice::Selected(vec![1])
+        );
+        // An index that is not in the list the user was shown must not select
+        // some other element: it dismisses instead.
+        assert_eq!(
+            control_choice(&request, "9: Ghost"),
+            ControlChoice::Dismissed
+        );
+        assert_eq!(control_choice(&request, "garbage"), ControlChoice::Dismissed);
+    }
+
+    #[test]
+    fn a_context_menu_answer_maps_to_its_action_index() {
+        let request = ControlRequest::ContextMenu {
+            items: vec!["Back".into(), "Reload".into()],
+        };
+        assert_eq!(
+            control_choice(&request, "1: Reload"),
+            ControlChoice::MenuItem(1)
+        );
+        assert_eq!(
+            control_choice(&request, "5: Nope"),
+            ControlChoice::Dismissed
+        );
+    }
+
+    #[test]
+    fn a_query_answer_is_left_raw_for_the_engine_to_validate() {
+        let colour = ControlRequest::Color { current: None };
+        assert_eq!(
+            control_choice(&colour, " #cf6a4c "),
+            ControlChoice::Color("#cf6a4c".into())
+        );
+
+        let file = ControlRequest::File { multiple: false };
+        assert_eq!(
+            control_choice(&file, "/home/nka/notes.md"),
+            ControlChoice::Files(vec!["/home/nka/notes.md".into()])
+        );
+    }
+
+    #[test]
+    fn select_entries_are_index_prefixed_and_ordered() {
+        let request = ControlRequest::Select {
+            options: vec!["Alpha".into(), "Beta".into()],
+            size: None,
+        };
+        assert_eq!(control_entries(&request), "0: Alpha\n1: Beta");
+    }
+
+    #[test]
+    fn a_colour_menu_offers_the_current_value_first() {
+        let request = ControlRequest::Color {
+            current: Some((0xcf, 0x6a, 0x4c)),
+        };
+        let entries = control_entries(&request);
+        let mut lines = entries.lines();
+        assert_eq!(lines.next(), Some("#cf6a4c"));
+        // The current value is not duplicated by the presets.
+        assert_eq!(entries.matches("#cf6a4c").count(), 1);
+
+        // And with no current value, only the presets remain.
+        let request = ControlRequest::Color { current: None };
+        assert!(!control_entries(&request).is_empty());
+    }
+
+    #[test]
+    fn a_file_listing_puts_directories_first_and_hides_dotfiles() {
+        let dir = std::env::temp_dir().join(format!("serf-listing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("subdir")).unwrap();
+        std::fs::write(dir.join("b.txt"), b"b").unwrap();
+        std::fs::write(dir.join("a.txt"), b"a").unwrap();
+        std::fs::write(dir.join(".hidden"), b"h").unwrap();
+
+        let listing = file_listing(dir.to_str().unwrap());
+        let lines: Vec<&str> = listing.lines().collect();
+        assert_eq!(lines.len(), 3, "one dir + two files, no dotfile: {lines:?}");
+        assert!(lines[0].ends_with("subdir/"), "dirs first, trailing slash");
+        assert!(lines[1].ends_with("a.txt"));
+        assert!(lines[2].ends_with("b.txt"));
+        assert!(!listing.contains(".hidden"));
+
+        // An unreadable directory is an empty menu, not a panic.
+        assert_eq!(file_listing("/definitely/not/a/directory"), "");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn named_keys_map_only_what_the_engine_knows() {
+        assert_eq!(named_key_name(NamedKey::ArrowDown), Some("ArrowDown"));
+        assert_eq!(named_key_name(NamedKey::Enter), Some("Enter"));
+        assert_eq!(named_key_name(NamedKey::PageUp), Some("PageUp"));
+        // Something serf has no mapping for is dropped rather than mistranslated.
+        assert_eq!(named_key_name(NamedKey::F35), None);
     }
 }

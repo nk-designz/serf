@@ -1,10 +1,31 @@
 # Making serf a daily driver on the Pinebook Pro
 
+> **Status: the P0 findings below are implemented.** `SerfDelegate`
+> (`src/browser/delegate.rs`) is installed on the `WebView`; real key, pointer,
+> wheel and scroll events are forwarded through the `Engine` trait; and the
+> external `tab_launcher` menu is wired for the tab list and for form controls.
+> The sections that follow are the original research notes, kept as the reasoning
+> behind those choices, with a status line where a finding has since been acted
+> on.
+
+### Still open after the delegate work
+
+| item | state |
+|---|---|
+| `alert()` / `confirm()` / `prompt()` | **auto-answered**, not shown. There is no modal UI to block on yet, and an unanswered dialog freezes the page on Servo's side. An alert gets OK, a confirm and a prompt get "cancel", and all three are logged with the page's message. |
+| `window.open` / `target="_blank"` | the child `WebView` is built (so the page's handle is real) but never painted, because serf renders exactly one view. The URL is adopted as a **new tab** instead. A site that relies on `window.opener` messaging between the two views will not work. |
+| `requestProtocolHandler` (`mailto:`), Bluetooth, notifications | left on Servo's defaults, which deny. |
+| **network-level adblocking** | **not done.** `load_web_resource` is not hooked, so `AdblockEngine::check` is never called: blocking is cosmetic only (`cosmetic_css` → injected stylesheet). The mission spec's "adblock-rust into Servo's network request hooks" is still unmet. |
+| HTTP authentication | deliberately not prompted for. The request is dropped, which cancels it — serf never collects credentials. |
+| GPU limits (WebGPU, WebXR) | unchanged; see the hardware section. |
+
+---
+
 Research notes, checked against `servo-0.7.0` in the local registry and against
-the Mesa/Panfrost docs — not from memory. Headline: **the blocker is mostly not
-Servo and mostly not hardware. It is that serf does not yet forward input or
-handle any embedder callbacks.** Two of the three workloads named are blocked by
-the *GPU driver*, not by us.
+the Mesa/Panfrost docs — not from memory. Headline as originally written: **the
+blocker is mostly not Servo and mostly not hardware. It is that serf does not yet
+forward input or handle any embedder callbacks.** Two of the three workloads
+named are blocked by the *GPU driver*, not by us.
 
 ---
 
