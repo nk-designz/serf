@@ -249,7 +249,10 @@ impl SerfDelegate {
     /// what Servo's default responder does, so only a positive block decision
     /// costs anything. Cosmetic filtering (`cosmetic_css`) hides what is left.
     fn block_if_filtered(&self, webview: &WebView, load: WebResourceLoad) {
-        let Some(adblock) = self.adblock.as_ref() else { return };
+        let Some(adblock) = self.adblock.as_ref() else {
+            log::debug!("serf: request with no filter engine configured");
+            return;
+        };
         // Everything the decision needs is copied out first: `load` is consumed
         // by `intercept`, and `request` borrows it.
         let (url, decision) = {
@@ -273,14 +276,16 @@ impl SerfDelegate {
                 kind,
                 request.method.as_str(),
             );
-            if decision.is_blocking() {
-                log::debug!(
-                    "serf: blocked {} ({}) for {}",
-                    request.url,
-                    kind.as_str(),
-                    source
-                );
-            }
+            // Every decision is logged, not just the blocks: "the filter never
+            // ran" and "the filter said allow" look identical from the outside,
+            // and that is exactly the question when an ad gets through.
+            log::debug!(
+                "serf: filter {} {} ({}) for {}",
+                if decision.is_blocking() { "BLOCK" } else { "allow" },
+                request.url,
+                kind.as_str(),
+                source
+            );
             (request.url.clone(), decision)
         };
         if !decision.is_blocking() {
