@@ -540,6 +540,14 @@ pub mod servo_backend {
     impl Engine for ServoEngine {
         fn spin(&mut self) {
             self.servo.spin_event_loop();
+            // Teardown of finished popups is deferred to here: their delegate
+            // callbacks arrive *inside* `spin_event_loop`, where dropping a
+            // `WebView` would race Servo closing the same view.
+            let finished = self.delegate.take_finished_aux();
+            if !finished.is_empty() {
+                log::debug!("serf: released {} finished popup view(s)", finished.len());
+            }
+            drop(finished);
         }
 
         fn present(&mut self) {

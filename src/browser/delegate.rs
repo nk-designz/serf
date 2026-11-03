@@ -69,6 +69,12 @@ struct Inner {
     /// Auxiliary web views kept alive so the page's `window.open` handle stays
     /// valid.
     aux: Vec<WebView>,
+    /// Auxiliary views whose document finished loading and whose teardown was
+    /// deferred to the event loop. Dropping a `WebView` sends a constellation
+    /// message and unregisters a rendering context, which must not happen while
+    /// `Servo::spin_event_loop` is running — that is the thread the callback
+    /// arrives on.
+    finished_aux: Vec<WebViewId>,
     /// A new frame is ready to paint.
     dirty: bool,
     /// Whether the page consumed the last key serf forwarded.
@@ -242,26 +248,34 @@ impl DelegateState {
     /// Once the load completes the handle has done its job, and dropping the
     /// view closes it (so `win.closed` becomes true, which pages tolerate).
     fn release_aux(&self, id: WebViewId) {
-        let doomed: Vec<WebView> = {
-            let mut inner = self.inner.borrow_mut();
-            let mut doomed = Vec::new();
-            let mut keep = Vec::with_capacity(inner.aux.len());
-            for view in inner.aux.drain(..) {
-                if view.id() == id {
-                    doomed.push(view);
-                } else {
-                    keep.push(view);
-                }
-            }
-            inner.aux = keep;
-            doomed
-        };
-        if !doomed.is_empty() {
-            log::debug!("serf: released {} finished popup view(s)", doomed.len());
+        // Only record it here. This runs inside a Servo delegate callback, so
+        // the view is dropped later by `take_finished_aux`, from the event loop
+        // after `spin_event_loop` has returned.
+        self.inner.borrow_mut().finished_aux.push(id);
+    }
+
+    /// Drop the auxiliary views whose loads finished, and report how many.
+    ///
+    /// Call this from the event loop *between* spins. `WebView::drop` sends
+    /// `CloseWebView` and unregisters the rendering context; doing that from
+    /// inside a delegate callback races Servo's own teardown of the same view.
+    pub fn take_finished_aux(&self) -> Vec<WebView> {
+        let mut inner = self.inner.borrow_mut();
+        if inner.finished_aux.is_empty() {
+            return Vec::new();
         }
-        // Dropped outside the `RefCell` borrow: each drop sends constellation
-        // messages and must not re-enter this state.
-        drop(doomed);
+        let finished = std::mem::take(&mut inner.finished_aux);
+        let mut doomed = Vec::new();
+        let mut keep = Vec::with_capacity(inner.aux.len());
+        for view in inner.aux.drain(..) {
+            if finished.contains(&view.id()) {
+                doomed.push(view);
+            } else {
+                keep.push(view);
+            }
+        }
+        inner.aux = keep;
+        doomed
     }
 }
 
