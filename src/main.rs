@@ -32,6 +32,13 @@ use serf::ui::theme::Theme;
 /// `mimalloc` is the global allocator: fewer syscalls and much lower
 /// fragmentation than glibc malloc on this workload (lots of small, short
 /// lived DOM/network allocations), which matters on a 4 GB ARM box.
+///
+/// Stub build only. With `--features servo` the engine links `servo_allocator`,
+/// which installs a `#[global_allocator]` of its own, and two of those in one
+/// binary is a hard error (E0152). Servo's allocator wins there: it is tuned
+/// for the engine's own allocation pattern, and overriding it from outside
+/// would be the wrong call even if it were legal.
+#[cfg(not(feature = "servo"))]
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -608,9 +615,12 @@ fn create_engine(homepage: &str, window: Option<&Window>) -> Result<Box<dyn Engi
         let window = window.context("the servo backend needs a winit window")?;
         let display_handle = window.display_handle().context("display handle")?;
         let window_handle = window.window_handle().context("window handle")?;
+        // `surfman::error::Error` does not implement `std::error::Error`, so
+        // anyhow's `.context()` cannot be used on it — attach the message by
+        // hand instead.
         let context = Rc::new(
             servo::WindowRenderingContext::new(display_handle, window_handle, window.inner_size())
-                .context("creating the Servo rendering context")?,
+                .map_err(|e| anyhow::anyhow!("creating the Servo rendering context: {e}"))?,
         );
         let _ = context.make_current();
 
