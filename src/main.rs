@@ -227,6 +227,12 @@ fn main() -> Result<()> {
     // Hot-reload the config when it changes on disk.
     let _watcher = config::spawn_watcher(store.clone(), config_path.clone(), None).ok();
 
+    // Report bindings that cannot take effect before the first key is pressed:
+    // a mistyped action name otherwise fails silently and looks like a bug in
+    // the browser rather than in the config.
+    for problem in Keymap::problems(&cfg.keybindings) {
+        log::error!("serf: keybinding {problem}");
+    }
     let keymap = Keymap::defaults().with_overrides(&cfg.keybindings);
     let start_mode = Mode::parse(&cfg.general.start_mode).unwrap_or(Mode::Normal);
 
@@ -882,6 +888,11 @@ impl App {
                 let c = s.chars().next()?;
                 if modifiers.contains(ModifiersState::CONTROL) {
                     Some(Key::Ctrl(c.to_ascii_lowercase()))
+                } else if modifiers.contains(ModifiersState::ALT) {
+                    // `Alt` is the one modifier a binding can name beyond `Ctrl`
+                    // (`<A-x>` in a config), so it has to reach the keymap as
+                    // its own key rather than as a plain character.
+                    Some(Key::Alt(c.to_ascii_lowercase()))
                 } else {
                     Some(Key::Char(c))
                 }

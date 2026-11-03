@@ -95,5 +95,30 @@ and hot-reload plumbing, the adblock engine against real filter syntax
 (including the mmap cache round trip), the vim state machine, hint
 generation/selection, the IPC socket, the status renderer and the tab model.
 
-The Servo backend is written but *not yet compiled* — it requires the
-SpiderMonkey build. See BUILD.md.
+The Servo backend builds and runs on aarch64 (CI, and daily use on a PineBook
+Pro under the mango compositor). What has been checked by running it, not by
+reading it:
+
+- pages render and input reaches them: clicks focus fields, typing goes into the
+  page, scrolling follows the element under the cursor;
+- Vim modes and the status bar behave (`O` prefills the current URL, `:` opens
+  the command line, the URL is never drawn over the title);
+- network adblocking blocks real requests (`serf-msg stats` reports e.g.
+  `blocked 31 of 336 filtered requests` on speedtest.net);
+- site data survives a restart: `localStorage`/IndexedDB through Servo's storage
+  threads, cookies through `browser/cookies.rs`.
+
+Not verified end-to-end: the `Ctrl` two-finger history/tab swipes — nothing in CI
+can synthesize a trackpad gesture.
+
+### Where state lives
+
+    ~/.config/serf/config.toml          configuration
+    ~/.local/share/serf/filters/        adblock lists and the mmap'd engine
+    ~/.local/share/serf/cookies.json    persistent cookies (0600, atomic write)
+    ~/.local/share/serf/servo/          Servo site data (localStorage, IndexedDB)
+
+Cookies are serf's own file rather than Servo's: Servo 0.7 keeps its cookie jar
+in memory only, so nothing else would survive a restart. Quitting through
+`q`/`:quit` shuts the engine down first, which is what makes Servo flush site
+data; a `SIGKILL` still loses that session's writes.

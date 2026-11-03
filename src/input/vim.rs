@@ -54,6 +54,8 @@ pub enum Key {
     Backspace,
     Tab,
     Ctrl(char),
+    /// `Alt`/`Meta` held with a character — `<A-x>`/`<M-x>` in a binding.
+    Alt(char),
 }
 
 impl Key {
@@ -68,9 +70,11 @@ impl Key {
                 "space" => Some(Key::Char(' ')),
                 // `<C-x>` — a modifier prefix, not a three-letter word.
                 other => {
+                    // `<C-x>`, `<A-x>`/`<M-x>`. A modifier prefix, not a word.
                     let mut chars = other.chars();
                     match (chars.next(), chars.next(), chars.next()) {
                         (Some('c'), Some('-'), Some(c)) => Some(Key::Ctrl(c)),
+                        (Some('a' | 'm'), Some('-'), Some(c)) => Some(Key::Alt(c)),
                         _ => None,
                     }
                 }
@@ -90,6 +94,17 @@ impl Key {
             "tab" => return Some(Key::Tab),
             _ => {}
         }
+        // `alt-x` / `meta-x` as a bare word, so a config can write
+        // `alt-r = "reload"` without angle brackets (which a TOML bare key
+        // cannot contain anyway).
+        for prefix in ["alt-", "meta-", "a-", "m-"] {
+            if let Some(rest) = tok.to_ascii_lowercase().strip_prefix(prefix) {
+                let mut chars = rest.chars();
+                if let (Some(c), None) = (chars.next(), chars.next()) {
+                    return Some(Key::Alt(c));
+                }
+            }
+        }
         let mut chars = tok.chars();
         match (chars.next(), chars.next()) {
             (Some(c), None) => Some(Key::Char(c)),
@@ -107,6 +122,7 @@ impl Key {
             Key::Backspace => "<BS>".into(),
             Key::Tab => "<Tab>".into(),
             Key::Ctrl(c) => format!("<C-{c}>"),
+            Key::Alt(c) => format!("<A-{c}>"),
         }
     }
 }
@@ -145,6 +161,47 @@ pub enum Action {
 
 impl Action {
     /// Parse an action name from the config.
+    /// The name a config binds this action with, or `None` for the variants
+    /// that carry data (a submitted command line, a pass-through key).
+    ///
+    /// Kept next to [`Action::from_name`] so the two can be tested against each
+    /// other: a binding documented in `config.example.toml` must survive the
+    /// trip from name to action and back.
+    pub fn name(&self) -> Option<&'static str> {
+        Some(match self {
+            Action::Scroll { dx: 0.0, dy } if *dy < 0.0 => "scroll-up",
+            Action::Scroll { dx: 0.0, dy } if *dy > 0.0 => "scroll-down",
+            Action::Scroll { dx, dy: 0.0 } if *dx < 0.0 => "scroll-left",
+            Action::Scroll { dx, dy: 0.0 } if *dx > 0.0 => "scroll-right",
+            Action::HalfPage { direction: -1 } => "half-page-up",
+            Action::HalfPage { direction: 1 } => "half-page-down",
+            Action::ScrollTop => "scroll-top",
+            Action::ScrollBottom => "scroll-bottom",
+            Action::Hint { new_tab: false } => "hint",
+            Action::Hint { new_tab: true } => "hint-new-tab",
+            Action::OpenPrompt { edit: false } => "open-prompt",
+            Action::OpenPrompt { edit: true } => "open-prompt-edit",
+            Action::Search { reverse: false } => "search",
+            Action::Search { reverse: true } => "search-reverse",
+            Action::HistoryBack => "history-back",
+            Action::HistoryForward => "history-forward",
+            Action::Reload => "reload",
+            Action::TabNext => "tab-next",
+            Action::TabPrev => "tab-prev",
+            Action::TabClose => "tab-close",
+            Action::TabNew => "tab-new",
+            Action::TabMenu => "tab-menu",
+            Action::YankUrl => "yank-url",
+            Action::PasteOpen => "paste-open",
+            Action::EnterMode(Mode::Normal) => "enter-normal",
+            Action::EnterMode(Mode::Insert) => "enter-insert",
+            Action::EnterMode(Mode::Command) => "enter-command",
+            Action::Quit => "quit",
+            Action::SubmitCommand(line) if line.is_empty() => "command-submit",
+            _ => return None,
+        })
+    }
+
     pub fn from_name(name: &str) -> Option<Action> {
         Some(match name {
             "scroll-up" => Action::Scroll { dx: 0.0, dy: -80.0 },
@@ -174,6 +231,9 @@ impl Action {
             "enter-normal" => Action::EnterMode(Mode::Normal),
             "enter-insert" => Action::EnterMode(Mode::Insert),
             "enter-command" => Action::EnterMode(Mode::Command),
+            // Submit whatever is on the command line (the default for <Enter> in
+            // command mode; named so a config can rebind it to another key).
+            "command-submit" => Action::SubmitCommand(String::new()),
             "quit" => Action::Quit,
             _ => return None,
         })
@@ -253,6 +313,33 @@ impl Keymap {
     }
 
     /// Overlay the user's config on top of the defaults.
+    /// Bindings in `kb` that will not take effect, as messages ready to log.
+    ///
+    /// A typo in an action name currently only produces a log line deep in the
+    /// merge; collecting them up front lets the event loop report it once, at a
+    /// level that shows under the default `RUST_LOG=warn`, instead of leaving
+    /// the user with a key that silently does nothing.
+    pub fn problems(kb: &Keybindings) -> Vec<String> {
+        let mut problems = Vec::new();
+        let modes: [(&str, &std::collections::BTreeMap<String, String>); 3] = [
+            ("normal", &kb.normal),
+            ("insert", &kb.insert),
+            ("command", &kb.command),
+        ];
+        for (mode, table) in modes {
+            for (chord, name) in table {
+                if parse_chord(chord).is_none() {
+                    problems.push(format!("{mode}: cannot read chord {chord:?}"));
+                } else if !name.trim().eq_ignore_ascii_case("none")
+                    && Action::from_name(name).is_none()
+                {
+                    problems.push(format!("{mode}: unknown action {name:?} for {chord:?}"));
+                }
+            }
+        }
+        problems
+    }
+
     pub fn with_overrides(mut self, kb: &Keybindings) -> Self {
         apply_table(&mut self.normal, &kb.normal);
         apply_table(&mut self.insert, &kb.insert);
@@ -271,6 +358,18 @@ impl Keymap {
 
 fn apply_table(table: &mut HashMap<Seq, Action>, src: &std::collections::BTreeMap<String, String>) {
     for (chord, name) in src {
+        // `none` is how a config *removes* a vim default instead of adding to
+        // it: the defaults are always merged first, so without this there is no
+        // way to free up a key the user does not want.
+        if name.trim().eq_ignore_ascii_case("none") {
+            match parse_chord(chord) {
+                Some(seq) => {
+                    table.remove(&seq);
+                }
+                None => log::warn!("serf: unparseable keybinding chord {chord:?}"),
+            }
+            continue;
+        }
         match (parse_chord(chord), Action::from_name(name)) {
             (Some(seq), Some(action)) => {
                 table.insert(seq, action);
@@ -613,5 +712,69 @@ mod tests {
         for m in [Mode::Normal, Mode::Insert, Mode::Command] {
             assert_eq!(Mode::parse(m.as_str()), Some(m));
         }
+    }
+
+    #[test]
+    fn every_named_action_round_trips_through_its_name() {
+        // The list a config author sees. If a variant gains a name in
+        // `from_name` and not in `name`, `:map`-style listings and this test
+        // disagree, which is exactly the drift worth catching.
+        for name in [
+            "scroll-up", "scroll-down", "scroll-left", "scroll-right",
+            "half-page-up", "half-page-down", "scroll-top", "scroll-bottom",
+            "hint", "hint-new-tab", "open-prompt", "open-prompt-edit",
+            "search", "search-reverse", "history-back", "history-forward",
+            "reload", "tab-next", "tab-prev", "tab-close", "tab-new",
+            "tab-menu", "yank-url", "paste-open", "enter-normal",
+            "enter-insert", "enter-command", "quit", "command-submit",
+        ] {
+            let action = Action::from_name(name).unwrap_or_else(|| panic!("{name} is not an action"));
+            assert_eq!(action.name(), Some(name), "{name} does not round-trip");
+        }
+    }
+
+    #[test]
+    fn every_vim_default_binds_an_action_that_has_a_name() {
+        // A default whose action cannot be named cannot be overridden back to
+        // that action from a config, which would make the defaults one-way.
+        for (seq, action) in Keymap::defaults().normal {
+            assert!(action.name().is_some(), "{seq:?} binds {action:?}, which has no name");
+        }
+    }
+
+    #[test]
+    fn a_mistyped_binding_is_reported_instead_of_ignored() {
+        let mut kb = Keybindings::default();
+        kb.normal.insert("j".into(), "scroll-dwn".into());
+        kb.normal.insert("nonsense".into(), "reload".into());
+        kb.normal.insert("q".into(), "none".into());
+        let problems = Keymap::problems(&kb);
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(problems.iter().any(|p| p.contains("scroll-dwn")), "{problems:?}");
+        assert!(problems.iter().any(|p| p.contains("nonsense")), "{problems:?}");
+        // `none` is a valid instruction, not a mistake.
+        assert!(!problems.iter().any(|p| p.contains("none")), "{problems:?}");
+    }
+
+    #[test]
+    fn none_unbinds_a_vim_default() {
+        let mut kb = Keybindings::default();
+        kb.normal.insert("q".into(), "none".into());
+        let map = Keymap::defaults().with_overrides(&kb);
+        assert_eq!(map.normal.get(&vec![Key::Char('q')]), None);
+        // Everything else survives: removing one key is not clearing the table.
+        assert_eq!(map.normal.get(&vec![Key::Char('j')]), Some(&Action::Scroll { dx: 0.0, dy: 80.0 }));
+    }
+
+    #[test]
+    fn alt_chords_bind_like_vim_control_chords() {
+        assert_eq!(Key::from_token("<A-r>"), Some(Key::Alt('r')));
+        assert_eq!(Key::from_token("<M-r>"), Some(Key::Alt('r')));
+        // The bare form exists because TOML bare keys cannot contain `<>`.
+        assert_eq!(Key::from_token("alt-r"), Some(Key::Alt('r')));
+        let mut kb = Keybindings::default();
+        kb.normal.insert("alt-r".into(), "reload".into());
+        let map = Keymap::defaults().with_overrides(&kb);
+        assert_eq!(map.normal.get(&vec![Key::Alt('r')]), Some(&Action::Reload));
     }
 }

@@ -2,7 +2,7 @@
 # Hot-reloaded at runtime: edits apply without restarting.
 
 [general]
-homepage = "about:blank"
+homepage = "https://duckduckgo.com/"
 # Where serf advertises its IPC socket for serf-msg.
 socket_path = "/tmp/serf.sock"
 # Launch external fuzzy launchers for tab / history selection.
@@ -59,38 +59,91 @@ zoom = 1.15
 hide = ["#cookie-banner", ".newsletter-modal"]
 zoom = 1.0
 
-# Keybindings: chord -> action. Chords are space-separated key sequences.
+# ---------------------------------------------------------------------------
+# Keybindings
+#
+# Vim defaults are always loaded first, then these tables are merged over them,
+# so a config only has to list what it changes. Everything here is commented out
+# for that reason: uncommenting a line only restates the default, except where
+# noted.
+#
+#   chord  space-separated key sequence:  "g g", "<C-d>", "alt-r", "<Tab>"
+#   action every name in the list below, or "none" to REMOVE a default so the
+#          key becomes free (the one thing merging alone cannot express)
+#
+# Key names: <Esc> <Enter> <Tab> <BS> <Space>, <C-x> for Control, <A-x> (or
+# alt-x) for Alt, and any single character as itself. Case matters: "G" and "g"
+# are different keys.
+#
+# A chord or action that cannot be understood is logged as
+# "serf: keybinding <mode>: ..." at startup instead of failing silently.
+# ---------------------------------------------------------------------------
+
 [keybindings.normal]
-"j" = "scroll-down"
-"k" = "scroll-up"
-"h" = "scroll-left"
-"l" = "scroll-right"
-"d" = "half-page-down"
-"u" = "half-page-up"
-"g g" = "scroll-top"
-"G" = "scroll-bottom"
-"f" = "hint"
-"F" = "hint-new-tab"
-"o" = "open-prompt"
-"O" = "open-prompt-edit"
-"H" = "history-back"
-"L" = "history-forward"
-"r" = "reload"
-"J" = "tab-prev"
-"K" = "tab-next"
-"d d" = "tab-close"
-"t" = "tab-new"
-# The tab list (and every page form control) goes to the external `tab_launcher`.
-"T" = "tab-menu"
-"i" = "enter-insert"
-":" = "enter-command"
-"/" = "search"
-"y" = "yank-url"
-"p" = "paste-open"
+# Scrolling
+# "j" = "scroll-down"
+# "k" = "scroll-up"
+# "h" = "scroll-left"
+# "l" = "scroll-right"
+# "<C-d>" = "half-page-down"
+# "<C-u>" = "half-page-up"
+# "d" = "half-page-down"
+# "u" = "half-page-up"
+# "g g" = "scroll-top"
+# "G" = "scroll-bottom"
+#
+# Follow a link, in this tab or a new one.
+# "f" = "hint"
+# "F" = "hint-new-tab"
+#
+# Open a URL. `O` starts from the current URL with the cursor at the end.
+# "o" = "open-prompt"
+# "O" = "open-prompt-edit"
+#
+# History and reload.
+# "H" = "history-back"
+# "L" = "history-forward"
+# "r" = "reload"
+#
+# Tabs. `T` opens the external tab launcher.
+# "J" = "tab-prev"
+# "K" = "tab-next"
+# "x" = "tab-close"
+# "t" = "tab-new"
+# "T" = "tab-menu"
+#
+# Modality and search.
+# ":" = "enter-command"
+# "/" = "search"                 (forward; "search-reverse" for backwards)
+# "i" = "enter-insert"
+#
+# Clipboard and engine.
+# "y" = "yank-url"
+# "p" = "paste-open"
+# "q" = "quit"
+#
+# To give a key something else, bind it; to free it entirely, use "none":
+# "x" = "none"
+# "alt-r" = "reload"
+# "<C-S-r>" is not supported: bindings take one modifier.
 
 [keybindings.insert]
-"<Escape>" = "enter-normal"
+# Insert mode forwards almost everything to the page.
+# "<Escape>" = "enter-normal"
 
 [keybindings.command]
-"<Escape>" = "enter-normal"
-"<Enter>" = "command-submit"
+# "<Escape>" = "enter-normal"
+# "<Enter>" = "command-submit"
+
+# --- every action name, for reference --------------------------------------
+#
+#   scroll-up  scroll-down  scroll-left  scroll-right
+#   half-page-up  half-page-down  scroll-top  scroll-bottom
+#   hint  hint-new-tab
+#   open-prompt  open-prompt-edit
+#   search  search-reverse
+#   history-back  history-forward  reload
+#   tab-next  tab-prev  tab-close  tab-new  tab-menu
+#   yank-url  paste-open
+#   enter-normal  enter-insert  enter-command  command-submit
+#   quit

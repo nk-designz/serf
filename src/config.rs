@@ -62,7 +62,7 @@ pub struct General {
 impl Default for General {
     fn default() -> Self {
         Self {
-            homepage: "about:blank".into(),
+            homepage: "https://duckduckgo.com/".into(),
             socket_path: DEFAULT_SOCKET.into(),
             tab_launcher: "fuzzel --dmenu".into(),
             search_engine: "https://duckduckgo.com/?q=%s".into(),
@@ -324,7 +324,7 @@ mod tests {
     fn parses_the_shipped_example_config() {
         let text = include_str!("../config.example.toml");
         let cfg = Config::from_str(text).expect("example config must parse");
-        assert_eq!(cfg.general.homepage, "about:blank");
+        assert_eq!(cfg.general.homepage, "https://duckduckgo.com/");
         assert!(cfg.adblock.enabled);
         assert_eq!(cfg.adblock.lists.len(), 1);
         assert_eq!(cfg.theme.source, "catppuccin");
