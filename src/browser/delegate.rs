@@ -258,7 +258,7 @@ impl SerfDelegate {
                 .referrer_url
                 .as_ref()
                 .map(|url| url.to_string())
-                .or_else(|| webview.url())
+                .or_else(|| webview.url().map(|url| url.to_string()))
                 .unwrap_or_default();
             let kind = RequestKind::from_fetch_dest(
                 request
@@ -438,7 +438,12 @@ impl WebViewDelegate for SerfDelegate {
         // — a synchronous callback would re-enter and panic.
         let child = request
             .builder(parent_webview.rendering_context())
-            .delegate(Rc::new(SerfDelegate::new(Rc::clone(&self.state))))
+            // The popup gets the same filter so an ad in a `window.open` is not
+            // a way around the blocklist.
+            .delegate(Rc::new(SerfDelegate::new(
+                Rc::clone(&self.state),
+                self.adblock.clone(),
+            )))
             .build();
         self.state.adopt_aux(child);
     }
