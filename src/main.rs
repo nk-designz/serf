@@ -65,6 +65,16 @@ struct Shared {
 }
 
 fn main() -> Result<()> {
+    // Exactly one thing may install the process-wide logger: `log::set_logger`
+    // succeeds once per process and every later call fails. In the servo build
+    // `servo.setup_logging()` (from `create_engine`) is that owner — it installs
+    // its own env_logger *and* a logger that routes engine logs to the
+    // constellation channel. Installing ours here as well made that second call
+    // panic with `Failed to set logger.: SetLoggerError(())`, which is fatal and
+    // killed the binary before it could paint its first frame. So the default
+    // build owns logging, and the servo build defers to Servo; set `RUST_LOG`
+    // to control the servo build's level.
+    #[cfg(not(feature = "servo"))]
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
         .format_timestamp(None)
         .init();

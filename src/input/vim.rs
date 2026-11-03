@@ -76,6 +76,20 @@ impl Key {
                 }
             };
         }
+        // Bare words that name a key. `<space>` was already accepted, but the
+        // natural way to write a binding in a config is `space = "..."`, and
+        // that used to fall through to the single-character path below, where
+        // 's' followed by 'p' meant "not a key" and the whole binding was
+        // dropped with "unparseable keybinding chord". Every alias here is
+        // multi-character, so no single character binding is shadowed.
+        match tok.to_ascii_lowercase().as_str() {
+            "space" => return Some(Key::Char(' ')),
+            "escape" | "esc" => return Some(Key::Escape),
+            "enter" | "cr" | "return" => return Some(Key::Enter),
+            "backspace" | "bs" => return Some(Key::Backspace),
+            "tab" => return Some(Key::Tab),
+            _ => {}
+        }
         let mut chars = tok.chars();
         match (chars.next(), chars.next()) {
             (Some(c), None) => Some(Key::Char(c)),
@@ -525,6 +539,18 @@ mod tests {
         assert_eq!(Key::from_token("<C-d>"), Some(Key::Ctrl('d')));
         assert_eq!(Key::from_token("<Space>"), Some(Key::Char(' ')));
         assert_eq!(Key::from_token("gg"), None);
+    }
+
+    #[test]
+    fn bare_key_names_parse_too() {
+        // Configs are written `space = "half-page-down"`, without angle brackets,
+        // and a bare "space" used to be rejected as an unparseable chord.
+        assert_eq!(Key::from_token("space"), Some(Key::Char(' ')));
+        assert_eq!(Key::from_token("esc"), Some(Key::Escape));
+        assert_eq!(Key::from_token("enter"), Some(Key::Enter));
+        assert_eq!(Key::from_token("tab"), Some(Key::Tab));
+        // A single character must still win over the word fallback.
+        assert_eq!(Key::from_token("j"), Some(Key::Char('j')));
     }
 
     #[test]
