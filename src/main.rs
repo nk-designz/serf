@@ -1034,7 +1034,7 @@ fn create_engine(
         // `surfman::error::Error` implements neither `std::error::Error` nor
         // `Display`, so anyhow's `.context()` is unavailable and `{e}` does not
         // compile — attach the message by hand and format with `{e:?}`.
-        let context: Rc<dyn RenderingContext> = Rc::new(
+        let context = Rc::new(
             servo::WindowRenderingContext::new(display_handle, window_handle, window.inner_size())
                 .map_err(|e| anyhow::anyhow!("creating the Servo rendering context: {e:?}"))?,
         );

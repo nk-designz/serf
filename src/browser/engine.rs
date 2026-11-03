@@ -423,7 +423,7 @@ pub mod servo_backend {
         Code, DevicePoint, DeviceVector2D, InputEvent, Key, KeyState, Location, Modifiers,
         MouseButton, MouseButtonAction, MouseButtonEvent, MouseMoveEvent, NamedKey,
         RenderingContext, Scroll, Servo, WebView, WebViewBuilder, WebViewPoint, WebViewVector,
-        WheelDelta, WheelEvent, WheelMode,
+        WheelDelta, WheelEvent, WheelMode, WindowRenderingContext,
     };
     use url::Url;
 
@@ -437,7 +437,7 @@ pub mod servo_backend {
     /// An [`Engine`] backed by a live Servo `WebView`.
     pub struct ServoEngine {
         servo: Servo,
-        rendering_context: Rc<dyn RenderingContext>,
+        rendering_context: Rc<WindowRenderingContext>,
         webview: RefCell<Option<WebView>>,
         zoom: f32,
         injected_css: RefCell<Vec<String>>,
@@ -451,7 +451,7 @@ pub mod servo_backend {
     }
 
     impl ServoEngine {
-        pub fn new(servo: Servo, rendering_context: Rc<dyn RenderingContext>) -> Self {
+        pub fn new(servo: Servo, rendering_context: Rc<WindowRenderingContext>) -> Self {
             Self {
                 servo,
                 rendering_context,
@@ -494,10 +494,18 @@ pub mod servo_backend {
 
         /// Present the last painted frame.
         pub fn present(&self) {
+            let (device, context) = self.rendering_context.surfman_details();
+            eprintln!("[SERF-BOOT-6f2] surface before paint: {:?}", device.context_surface_info(&context));
+            drop((device, context));
             if let Some(webview) = self.webview.borrow().as_ref() {
+                eprintln!("[SERF-BOOT-6f2] webview paint start");
                 webview.paint();
+                eprintln!("[SERF-BOOT-6f2] webview paint end");
+            } else {
+                eprintln!("[SERF-BOOT-6f2] NO WEBVIEW");
             }
             self.rendering_context.present();
+            eprintln!("[SERF-BOOT-6f2] context present end");
         }
 
         fn with_webview<T>(&self, f: impl FnOnce(&WebView) -> T) -> Result<T> {
