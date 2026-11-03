@@ -456,6 +456,9 @@ pub mod servo_backend {
         pointer: RefCell<(f64, f64)>,
         /// The network filter, shared with the delegate that runs the hook.
         adblock: Option<Rc<crate::adblock::AdblockEngine>>,
+        /// Counters the delegate bumps per request; see `serf-msg stats`.
+        filtered: Arc<std::sync::atomic::AtomicU64>,
+        blocked: Arc<std::sync::atomic::AtomicU64>,
     }
 
     impl ServoEngine {
@@ -463,6 +466,8 @@ pub mod servo_backend {
             servo: Servo,
             rendering_context: Rc<dyn RenderingContext>,
             adblock: Option<Rc<crate::adblock::AdblockEngine>>,
+            filtered: Arc<std::sync::atomic::AtomicU64>,
+            blocked: Arc<std::sync::atomic::AtomicU64>,
         ) -> Self {
             Self {
                 servo,
@@ -473,6 +478,8 @@ pub mod servo_backend {
                 delegate: Rc::new(DelegateState::default()),
                 pointer: RefCell::new((0.0, 0.0)),
                 adblock,
+                filtered,
+                blocked,
             }
         }
 
@@ -484,6 +491,8 @@ pub mod servo_backend {
                 .delegate(Rc::new(SerfDelegate::new(
                     Rc::clone(&self.delegate),
                     self.adblock.clone(),
+                    self.filtered.clone(),
+                    self.blocked.clone(),
                 )));
             let webview = builder.build();
             // Every delegate callback is filtered on this id, so only the view the

@@ -22,6 +22,8 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use servo::{
     AllowOrDenyRequest, AuthenticationRequest, ConsoleLogLevel, ContextMenuAction,
@@ -231,11 +233,25 @@ pub struct SerfDelegate {
     /// main thread; Servo delivers `load_web_resource` on the thread that drives
     /// `spin_event_loop`, so this is reachable exactly where it is needed.
     adblock: Option<Rc<crate::adblock::AdblockEngine>>,
+    /// Requests the filter was asked about, and how many it cancelled. Shared
+    /// with the embedder so `serf-msg stats` can prove the network hook ran.
+    filtered: Arc<AtomicU64>,
+    blocked: Arc<AtomicU64>,
 }
 
 impl SerfDelegate {
-    pub fn new(state: Rc<DelegateState>, adblock: Option<Rc<crate::adblock::AdblockEngine>>) -> Self {
-        Self { state, adblock }
+    pub fn new(
+        state: Rc<DelegateState>,
+        adblock: Option<Rc<crate::adblock::AdblockEngine>>,
+        filtered: Arc<AtomicU64>,
+        blocked: Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            state,
+            adblock,
+            filtered,
+            blocked,
+        }
     }
 
     /// Whether `webview` is the one that drives the tab model.
@@ -257,6 +273,7 @@ impl SerfDelegate {
         // by `intercept`, and `request` borrows it.
         let (url, decision) = {
             let request = load.request();
+            self.filtered.fetch_add(1, Ordering::Relaxed);
             let source = request
                 .referrer_url
                 .as_ref()
@@ -291,6 +308,7 @@ impl SerfDelegate {
         if !decision.is_blocking() {
             return;
         }
+        self.blocked.fetch_add(1, Ordering::Relaxed);
         load.intercept(WebResourceResponse::new(url)).cancel();
     }
 }
@@ -448,6 +466,8 @@ impl WebViewDelegate for SerfDelegate {
             .delegate(Rc::new(SerfDelegate::new(
                 Rc::clone(&self.state),
                 self.adblock.clone(),
+                self.filtered.clone(),
+                self.blocked.clone(),
             )))
             .build();
         self.state.adopt_aux(child);

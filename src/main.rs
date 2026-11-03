@@ -73,6 +73,11 @@ struct Shared {
     config: SharedConfig,
     session: Mutex<Session>,
     overlay: Arc<OverlayState>,
+    /// Requests the filter engine cancelled, so `serf-msg status`/`stats` can
+    /// report something a human can check without reading logs.
+    blocked: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Requests the page layer asked the filter about, blocked or not.
+    filtered: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 fn main() -> Result<()> {
@@ -174,10 +179,14 @@ fn main() -> Result<()> {
         false,
     ));
 
+    let blocked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let filtered = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let shared = Arc::new(Shared {
         config: store.clone(),
         session: Mutex::new(session),
         overlay: overlay.clone(),
+        blocked: blocked.clone(),
+        filtered: filtered.clone(),
     });
 
     // Start the layer-shell status overlay on its own connection/thread. A
@@ -240,6 +249,14 @@ fn main() -> Result<()> {
 }
 
 fn serve_command(shared: &Arc<Shared>, proxy: &EventLoopProxy<UserEvent>, line: &str) -> Response {
+    // `stats` is answered here rather than by the tab model: it reports what the
+    // page layer did, which the session cannot see.
+    if line.trim() == "stats" {
+        let blocked = shared.blocked.load(std::sync::atomic::Ordering::Relaxed);
+        let filtered = shared.filtered.load(std::sync::atomic::Ordering::Relaxed);
+        return Response::ok(format!("blocked {blocked} of {filtered} filtered requests"))
+            .with_data(serde_json::json!({ "blocked": blocked, "filtered": filtered }));
+    }
     let (response, effect) = {
         let mut session = match shared.session.lock() {
             Ok(s) => s,
@@ -884,6 +901,8 @@ impl ApplicationHandler<UserEvent> for App {
             Some(&window),
             self.wake.clone(),
             self.adblock.clone(),
+            self.shared.blocked.clone(),
+            self.shared.filtered.clone(),
         ) {
             Ok(engine) => self.engine = Some(engine),
             Err(e) => {
@@ -1067,6 +1086,8 @@ fn create_engine(
     window: Option<&Window>,
     wake: EventLoopProxy<UserEvent>,
     adblock: Option<Rc<AdblockEngine>>,
+    blocked: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    filtered: std::sync::Arc<std::sync::atomic::AtomicU64>,
 ) -> Result<Box<dyn Engine>> {
     #[cfg(feature = "servo")]
     {
@@ -1094,7 +1115,7 @@ fn create_engine(
             .build();
         servo.setup_logging();
 
-        let engine = ServoEngine::new(servo, context, adblock);
+        let engine = ServoEngine::new(servo, context, adblock, blocked, filtered);
         let url = url::Url::parse(homepage).context("invalid homepage URL")?;
         engine.create_webview(&url, window.scale_factor() as f32)?;
         Ok(Box::new(engine))
@@ -1103,7 +1124,7 @@ fn create_engine(
     {
         // The stub engine paints nothing, so neither the window nor the wake handle
         // is needed here, and it performs no network loads to filter.
-        let _ = (window, wake, adblock);
+        let _ = (window, wake, adblock, blocked, filtered);
         Ok(Box::new(StubEngine::new(homepage)))
     }
 }
