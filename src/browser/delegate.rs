@@ -24,11 +24,15 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use servo::{
-    AllowOrDenyRequest, AuthenticationRequest, ConsoleLogLevel, ContextMenu, ContextMenuAction,
+    AllowOrDenyRequest, AuthenticationRequest, ConsoleLogLevel, ContextMenuAction,
     ContextMenuItem, CreateNewWebViewRequest, EmbedderControl, EmbedderControlId, InputEventId,
     InputEventResult, LoadStatus, NavigationRequest, PermissionRequest, RgbColor, SelectElement,
-    SelectElementOptionOrOptgroup, SimpleDialog, Url, WebView, WebViewDelegate, WebViewId,
+    SelectElementOptionOrOptgroup, SimpleDialog, WebView, WebViewDelegate, WebViewId,
 };
+// `Url` is the `url` crate's, not servo's — servo does not re-export it, and
+// `WebResourceRequest.url` and the navigation callbacks are all `url::Url`.
+// serf already depends on `url` for parsing, so this is the same instance.
+use url::Url;
 
 use super::engine::{ControlChoice, ControlRequest, PageState};
 

@@ -408,15 +408,20 @@ pub mod servo_backend {
     use std::rc::Rc;
 
     use anyhow::{anyhow, Result};
-    // The input types themselves come from `servo` (it re-exports
-    // `embedder_traits`), but `KeyboardEvent` is not in that re-export list, so
-    // the crate is named directly — at the same 0.8.3 servo requires, so cargo
-    // unifies it into one instance and `servo::Key` and this `KeyboardEvent`
-    // agree on their key type.
-    use keyboard_types::KeyboardEvent;
+    // `servo` re-exports the keyboard *primitives* (Key, Code, KeyState, Location,
+    // Modifiers) but NOT `KeyboardEvent`, and the two are genuinely different
+    // types: servo wraps the raw one in its own struct,
+    //
+    //     pub struct KeyboardEvent { pub event: ::keyboard_types::KeyboardEvent }
+    //
+    // So naming the crate directly does NOT make them interchangeable — the raw
+    // event has to be wrapped with `servo::KeyboardEvent::new` at the point of
+    // use. The version is pinned to the same 0.8.3 servo requires, so cargo
+    // unifies it into a single instance and the key types agree.
+    use keyboard_types::KeyboardEvent as RawKeyEvent;
     use servo::{
-        Code, DevicePoint, DeviceVector2D, InputEvent, Key, KeyState, LoadStatus, Location,
-        Modifiers, MouseButton, MouseButtonAction, MouseButtonEvent, MouseMoveEvent, NamedKey,
+        Code, DevicePoint, DeviceVector2D, InputEvent, Key, KeyState, Location, Modifiers,
+        MouseButton, MouseButtonAction, MouseButtonEvent, MouseMoveEvent, NamedKey,
         RenderingContext, Scroll, Servo, WebView, WebViewBuilder, WebViewPoint, WebViewVector,
         WheelDelta, WheelEvent, WheelMode,
     };
@@ -637,8 +642,10 @@ pub mod servo_backend {
             // The return value only says the event was handed to Servo; whether
             // the page *consumed* it arrives later through
             // `notify_input_event_handled` and is reported by `last_key_handled`.
+            // Wrapped: servo's `InputEvent::Keyboard` takes servo's own
+            // `KeyboardEvent`, which is a newtype over the raw one.
             self.with_webview(|w| {
-                w.notify_input_event(InputEvent::Keyboard(event));
+                w.notify_input_event(InputEvent::Keyboard(servo::KeyboardEvent::new(event)));
             })
             .is_ok()
         }
@@ -725,7 +732,7 @@ pub mod servo_backend {
     ///
     /// `None` for a key serf cannot name, so an unmapped key is dropped instead
     /// of being sent as a bogus one.
-    fn keyboard_event(key: &PageKey) -> Option<KeyboardEvent> {
+    fn keyboard_event(key: &PageKey) -> Option<RawKeyEvent> {
         let logical = match (&key.character, &key.named) {
             (Some(text), _) => Key::Character(text.clone()),
             (None, Some(name)) => Key::Named(named_key(name)?),
@@ -742,9 +749,10 @@ pub mod servo_backend {
             modifiers |= Modifiers::SHIFT;
         }
         if key.logo {
-            modifiers |= Modifiers::SUPER;
+            // META, not SUPER: SUPER is deprecated (marked legacy in the spec).
+            modifiers |= Modifiers::META;
         }
-        Some(KeyboardEvent {
+        Some(RawKeyEvent {
             state: if key.release {
                 KeyState::Up
             } else {
