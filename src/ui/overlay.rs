@@ -510,6 +510,11 @@ mod wayland_surface {
         height: u32,
         scale: u32,
         shared: Arc<OverlayState>,
+        /// A wlr-layer-shell surface may not be attached to a buffer before the
+        /// compositor's first `configure`; doing so is a protocol error that
+        /// aborts the whole connection. Updates that arrive before that are
+        /// rendered by the configure handler itself.
+        configured: bool,
     }
 
     impl LayerState {
@@ -626,6 +631,7 @@ mod wayland_surface {
                     state.width = if width == 0 { state.width } else { width };
                     state.height = if height == 0 { state.height } else { height };
                     state.layer.ack_configure(serial);
+                    state.configured = true;
                     if let Err(e) = state.redraw(qh) {
                         log::warn!("serf: overlay redraw failed: {e}");
                     }
@@ -689,6 +695,7 @@ mod wayland_surface {
             height,
             scale: scale.max(1),
             shared,
+            configured: false,
         };
 
         // First round-trip delivers the initial configure.
@@ -702,7 +709,10 @@ mod wayland_surface {
         // the eventfd keeps the thread asleep when nothing changes.
         loop {
             queue.dispatch_pending(&mut state).context("dispatching overlay events")?;
-            if state.shared.take_dirty() {
+            // Before the first configure the surface must not be given a buffer:
+            // a commit there is a protocol error, not a no-op. The configure
+            // handler draws the current state as soon as it is allowed to.
+            if state.configured && state.shared.take_dirty() {
                 state.redraw(&qh)?;
             }
             queue.flush().context("flushing overlay requests")?;
