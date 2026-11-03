@@ -10,6 +10,7 @@
 //!      machine and the tab/history model.
 
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -27,6 +28,7 @@ use serf::browser::engine::{
 use serf::browser::launcher::Launcher;
 use serf::browser::navigation::{Command, Effect, Session};
 use serf::config::{self, Config, SharedConfig};
+use serf::input::gesture::{Swipe, SwipeAccumulator};
 use serf::input::hints::{HintOutcome, HintSession, LinkBox};
 use serf::input::vim::{Action, Key, Keymap, Mode, VimState};
 use serf::ipc::{Response, Server};
@@ -148,7 +150,7 @@ fn main() -> Result<()> {
         let lists: Vec<PathBuf> = cfg.adblock.lists.iter().map(|s| config::expand_tilde(s)).collect();
         let cache = config::expand_tilde(&cfg.adblock.cache);
         match AdblockEngine::load_or_build(&lists, &cache, &cfg.adblock.tags) {
-            Ok(engine) => Some(engine),
+            Ok(engine) => Some(std::rc::Rc::new(engine)),
             Err(e) => {
                 log::warn!("serf: adblock disabled ({e}); continuing without it");
                 None
@@ -224,6 +226,7 @@ fn main() -> Result<()> {
         config_path,
         modifiers: ModifiersState::empty(),
         pointer: (0.0, 0.0),
+        swipe: SwipeAccumulator::new(60.0),
         launcher: None,
         menu_purpose: None,
         wake: proxy.clone(),
@@ -313,8 +316,9 @@ struct App {
     engine: Option<Box<dyn Engine>>,
     window: Option<Window>,
     theme: Theme,
-    /// Main-thread-only: `adblock::Engine` is not `Send`.
-    adblock: Option<AdblockEngine>,
+    /// Main-thread-only: `adblock::Engine` is not `Send`. Shared by `Rc` with the
+    /// page delegate, which runs the same network hook from the embedder thread.
+    adblock: Option<Rc<AdblockEngine>>,
     config_path: PathBuf,
     /// Live modifier state. serf's keymap needs it to resolve `<C-d>`-style
     /// chords, and the page needs it on every forwarded key.
@@ -322,6 +326,8 @@ struct App {
     /// Where the pointer was last seen, in device pixels — the origin a click or
     /// a scroll is resolved against.
     pointer: (f64, f64),
+    /// Two-finger horizontal swipe state (`Ctrl` = history, `Ctrl+Shift` = tabs).
+    swipe: SwipeAccumulator,
     /// A running external menu, if one is open.
     launcher: Option<Launcher>,
     /// What that menu is choosing, so its answer can be applied.
@@ -346,6 +352,13 @@ enum MenuPurpose {
 /// case has to be scaled. 50 is the browser-typical step and matches what the
 /// `j`/`k` scroll distance already feels like.
 const PIXELS_PER_WHEEL_LINE: f64 = 50.0;
+
+/// Whether a wheel delta is a horizontal swipe rather than a mostly-vertical
+/// scroll. A touchpad never moves on exactly one axis, so "horizontal" means
+/// the x component dominates; a pure wheel has no x component at all.
+fn x_dominates(dx: f64, dy: f64) -> bool {
+    dx != 0.0 && dx.abs() > dy.abs()
+}
 
 impl App {
     fn sync_status(&self) {
@@ -866,7 +879,12 @@ impl ApplicationHandler<UserEvent> for App {
             .map(|c| c.general.homepage.clone())
             .unwrap_or_else(|_| "about:blank".into());
 
-        match create_engine(&homepage, Some(&window), self.wake.clone()) {
+        match create_engine(
+            &homepage,
+            Some(&window),
+            self.wake.clone(),
+            self.adblock.clone(),
+        ) {
             Ok(engine) => self.engine = Some(engine),
             Err(e) => {
                 log::error!("serf: engine init failed: {e}");
@@ -934,8 +952,14 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 // The keymap resolves `<C-d>`-style chords from this, so a stale
-                // value silently disables every modified binding.
-                self.modifiers = modifiers.state();
+                // value silently disables every modified binding. Releasing Ctrl
+                // also ends any half-finished swipe, so it cannot combine with
+                // the next one.
+                let state = modifiers.state();
+                if !state.contains(ModifiersState::CONTROL) {
+                    self.swipe.reset();
+                }
+                self.modifiers = state;
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if self.hints.is_some() {
@@ -992,9 +1016,25 @@ impl ApplicationHandler<UserEvent> for App {
                     ),
                     MouseScrollDelta::PixelDelta(position) => (position.x, position.y),
                 };
-                let (x, y) = self.pointer;
-                if let Some(engine) = self.engine.as_mut() {
-                    engine.send_wheel(dx, dy, x, y);
+
+                // A two-finger horizontal swipe is navigation, not scrolling,
+                // but only while Ctrl is down: plain horizontal swipes must keep
+                // panning wide pages. Ctrl = history, Ctrl+Shift = tabs.
+                let gesture = self.modifiers.contains(ModifiersState::CONTROL);
+                if gesture && x_dominates(dx, dy) {
+                    let tabs = self.modifiers.contains(ModifiersState::SHIFT);
+                    match self.swipe.push(dx, std::time::Instant::now()) {
+                        Some(Swipe::Back) if tabs => self.apply_action(Action::TabPrev),
+                        Some(Swipe::Forward) if tabs => self.apply_action(Action::TabNext),
+                        Some(Swipe::Back) => self.apply_action(Action::HistoryBack),
+                        Some(Swipe::Forward) => self.apply_action(Action::HistoryForward),
+                        None => {}
+                    }
+                } else {
+                    let (x, y) = self.pointer;
+                    if let Some(engine) = self.engine.as_mut() {
+                        engine.send_wheel(dx, dy, x, y);
+                    }
                 }
             }
             _ => {}
@@ -1026,6 +1066,7 @@ fn create_engine(
     homepage: &str,
     window: Option<&Window>,
     wake: EventLoopProxy<UserEvent>,
+    adblock: Option<Rc<AdblockEngine>>,
 ) -> Result<Box<dyn Engine>> {
     #[cfg(feature = "servo")]
     {
@@ -1053,7 +1094,7 @@ fn create_engine(
             .build();
         servo.setup_logging();
 
-        let engine = ServoEngine::new(servo, context);
+        let engine = ServoEngine::new(servo, context, adblock);
         let url = url::Url::parse(homepage).context("invalid homepage URL")?;
         engine.create_webview(&url, window.scale_factor() as f32)?;
         Ok(Box::new(engine))
@@ -1061,8 +1102,8 @@ fn create_engine(
     #[cfg(not(feature = "servo"))]
     {
         // The stub engine paints nothing, so neither the window nor the wake handle
-        // is needed here.
-        let _ = (window, wake);
+        // is needed here, and it performs no network loads to filter.
+        let _ = (window, wake, adblock);
         Ok(Box::new(StubEngine::new(homepage)))
     }
 }
@@ -1242,6 +1283,17 @@ fn file_listing(dir: &str) -> String {
 #[cfg(test)]
 mod menu_tests {
     use super::*;
+
+    #[test]
+    fn a_horizontal_swipe_is_told_apart_from_a_scroll() {
+        // Two fingers almost never move on one axis only.
+        assert!(x_dominates(-12.0, 3.0));
+        assert!(x_dominates(9.0, -2.0));
+        // Mostly-vertical travel is a scroll, and a pure wheel has no x at all.
+        assert!(!x_dominates(2.0, -30.0));
+        assert!(!x_dominates(0.0, -30.0));
+        assert!(!x_dominates(0.0, 0.0));
+    }
 
     #[test]
     fn leading_index_reads_the_entry_prefix() {

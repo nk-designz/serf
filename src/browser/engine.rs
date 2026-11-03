@@ -454,10 +454,16 @@ pub mod servo_backend {
         /// this is what makes scrolling the pane under the cursor rather than an
         /// arbitrary one — and what the vim scroll keys use as their origin.
         pointer: RefCell<(f64, f64)>,
+        /// The network filter, shared with the delegate that runs the hook.
+        adblock: Option<Rc<crate::adblock::AdblockEngine>>,
     }
 
     impl ServoEngine {
-        pub fn new(servo: Servo, rendering_context: Rc<dyn RenderingContext>) -> Self {
+        pub fn new(
+            servo: Servo,
+            rendering_context: Rc<dyn RenderingContext>,
+            adblock: Option<Rc<crate::adblock::AdblockEngine>>,
+        ) -> Self {
             Self {
                 servo,
                 rendering_context,
@@ -466,6 +472,7 @@ pub mod servo_backend {
                 injected_css: RefCell::new(Vec::new()),
                 delegate: Rc::new(DelegateState::default()),
                 pointer: RefCell::new((0.0, 0.0)),
+                adblock,
             }
         }
 
@@ -474,7 +481,10 @@ pub mod servo_backend {
             let builder = WebViewBuilder::new(&self.servo, self.rendering_context.clone())
                 .url(url.clone())
                 .hidpi_scale_factor(euclid::Scale::new(scale))
-                .delegate(Rc::new(SerfDelegate::new(Rc::clone(&self.delegate))));
+                .delegate(Rc::new(SerfDelegate::new(
+                    Rc::clone(&self.delegate),
+                    self.adblock.clone(),
+                )));
             let webview = builder.build();
             // Every delegate callback is filtered on this id, so only the view the
             // user is actually looking at drives the tab model; an auxiliary view

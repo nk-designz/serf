@@ -27,8 +27,10 @@ use servo::{
     AllowOrDenyRequest, AuthenticationRequest, ConsoleLogLevel, ContextMenuAction,
     ContextMenuItem, CreateNewWebViewRequest, EmbedderControl, EmbedderControlId, InputEventId,
     InputEventResult, LoadStatus, NavigationRequest, PermissionRequest, RgbColor, SelectElement,
-    SelectElementOptionOrOptgroup, SimpleDialog, WebView, WebViewDelegate, WebViewId,
+    SelectElementOptionOrOptgroup, SimpleDialog, WebResourceLoad, WebResourceResponse, WebView,
+    WebViewDelegate, WebViewId,
 };
+use crate::adblock::RequestKind;
 // `Url` is the `url` crate's, not servo's — servo does not re-export it, and
 // `WebResourceRequest.url` and the navigation callbacks are all `url::Url`.
 // serf already depends on `url` for parsing, so this is the same instance.
@@ -225,16 +227,66 @@ impl DelegateState {
 /// The [`WebViewDelegate`] serf installs on every web view it creates.
 pub struct SerfDelegate {
     state: Rc<DelegateState>,
+    /// The compiled filter engine. `adblock::Engine` is `!Send` and lives on the
+    /// main thread; Servo delivers `load_web_resource` on the thread that drives
+    /// `spin_event_loop`, so this is reachable exactly where it is needed.
+    adblock: Option<Rc<crate::adblock::AdblockEngine>>,
 }
 
 impl SerfDelegate {
-    pub fn new(state: Rc<DelegateState>) -> Self {
-        Self { state }
+    pub fn new(state: Rc<DelegateState>, adblock: Option<Rc<crate::adblock::AdblockEngine>>) -> Self {
+        Self { state, adblock }
     }
 
     /// Whether `webview` is the one that drives the tab model.
     fn is_main(&self, webview: &WebView) -> bool {
         *self.state.main.borrow() == Some(webview.id())
+    }
+
+    /// The network hook: cancel a request the filter lists reject.
+    ///
+    /// Dropping the load without intercepting it means "let it through", which is
+    /// what Servo's default responder does, so only a positive block decision
+    /// costs anything. Cosmetic filtering (`cosmetic_css`) hides what is left.
+    fn block_if_filtered(&self, webview: &WebView, load: WebResourceLoad) {
+        let Some(adblock) = self.adblock.as_ref() else { return };
+        // Everything the decision needs is copied out first: `load` is consumed
+        // by `intercept`, and `request` borrows it.
+        let (url, decision) = {
+            let request = load.request();
+            let source = request
+                .referrer_url
+                .as_ref()
+                .map(|url| url.to_string())
+                .or_else(|| webview.url())
+                .unwrap_or_default();
+            let kind = RequestKind::from_fetch_dest(
+                request
+                    .headers
+                    .get("sec-fetch-dest")
+                    .and_then(|v| v.to_str().ok()),
+                request.url.as_str(),
+            );
+            let decision = adblock.check(
+                request.url.as_str(),
+                &source,
+                kind,
+                request.method.as_str(),
+            );
+            if decision.is_blocking() {
+                log::debug!(
+                    "serf: blocked {} ({}) for {}",
+                    request.url,
+                    kind.as_str(),
+                    source
+                );
+            }
+            (request.url.clone(), decision)
+        };
+        if !decision.is_blocking() {
+            return;
+        }
+        load.intercept(WebResourceResponse::new(url)).cancel();
     }
 }
 
@@ -247,6 +299,11 @@ impl WebViewDelegate for SerfDelegate {
             // which renders everything in its single main view.
             self.state.note_new_tab(url.to_string());
         }
+    }
+
+    /// The filter decision is `Decision`; only the blocking variants cancel.
+    fn load_web_resource(&self, webview: WebView, load: WebResourceLoad) {
+        self.block_if_filtered(&webview, load);
     }
 
     fn notify_page_title_changed(&self, webview: WebView, title: Option<String>) {

@@ -84,6 +84,48 @@ impl RequestKind {
         }
     }
 
+    /// Map a `Sec-Fetch-Dest` value onto the filter-vocabulary request type.
+    ///
+    /// This is the only place Servo tells us what a request is *for*, and the
+    /// filter lists are keyed on exactly that distinction (`$script`, `$image`,
+    /// `$subdocument`, ...). Missing or unknown values fall back to the URL's
+    /// own shape rather than being guessed as a document.
+    pub fn from_fetch_dest(dest: Option<&str>, url: &str) -> Self {
+        match dest.map(|d| d.trim().to_ascii_lowercase()).as_deref() {
+            Some("document") => RequestKind::Document,
+            Some("iframe") | Some("frame") | Some("embed") | Some("object") => {
+                RequestKind::Subdocument
+            }
+            Some("script") | Some("worker") | Some("sharedworker") | Some("serviceworker") => {
+                RequestKind::Script
+            }
+            Some("image") => RequestKind::Image,
+            Some("style") => RequestKind::Stylesheet,
+            Some("font") => RequestKind::Font,
+            Some("audio") | Some("video") | Some("track") => RequestKind::Media,
+            Some("empty") | Some("json") | Some("text") => RequestKind::Xhr,
+            Some(_) => RequestKind::Other,
+            None => RequestKind::from_extension(url),
+        }
+    }
+
+    /// Guess a request type from the URL when the page sent no fetch metadata.
+    fn from_extension(url: &str) -> Self {
+        let path = url.split(['?', '#']).next().unwrap_or(url);
+        let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+        match ext.as_str() {
+            "js" | "mjs" => RequestKind::Script,
+            "css" => RequestKind::Stylesheet,
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "avif" | "ico" => {
+                RequestKind::Image
+            }
+            "woff" | "woff2" | "ttf" | "otf" => RequestKind::Font,
+            "mp4" | "webm" | "mp3" | "ogg" | "m4a" => RequestKind::Media,
+            "html" | "htm" => RequestKind::Document,
+            _ => RequestKind::Other,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             RequestKind::Document => "document",
@@ -339,6 +381,25 @@ example.com#@#.keep-me
         static N: AtomicU32 = AtomicU32::new(0);
         let n = N.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!("serf-adblock-{tag}-{}-{n}.dat", std::process::id()))
+    }
+
+    #[test]
+    fn fetch_dest_decides_the_request_type() {
+        use RequestKind::*;
+        assert_eq!(RequestKind::from_fetch_dest(Some("document"), "https://a/"), Document);
+        assert_eq!(RequestKind::from_fetch_dest(Some("IFRAME"), "https://a/"), Subdocument);
+        assert_eq!(RequestKind::from_fetch_dest(Some("script"), "https://a/"), Script);
+        assert_eq!(RequestKind::from_fetch_dest(Some("image"), "https://a/"), Image);
+        assert_eq!(RequestKind::from_fetch_dest(Some("style"), "https://a/"), Stylesheet);
+        assert_eq!(RequestKind::from_fetch_dest(Some("font"), "https://a/"), Font);
+        assert_eq!(RequestKind::from_fetch_dest(Some("video"), "https://a/"), Media);
+        assert_eq!(RequestKind::from_fetch_dest(Some("empty"), "https://a/api"), Xhr);
+        // No fetch metadata: fall back to the URL's shape, never to Document,
+        // or every extensionless beacon would be filtered as a page load.
+        assert_eq!(RequestKind::from_fetch_dest(None, "https://a/x.js?v=1"), Script);
+        assert_eq!(RequestKind::from_fetch_dest(None, "https://a/logo.PNG"), Image);
+        assert_eq!(RequestKind::from_fetch_dest(None, "https://a/page.html#top"), Document);
+        assert_eq!(RequestKind::from_fetch_dest(None, "https://a/beacon"), Other);
     }
 
     #[test]

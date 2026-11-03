@@ -1,4 +1,5 @@
-//! Keyboard input: the modal state machine and the link-hint overlay.
+//! Input: the vim state machine, hit hints, and pointer gestures.
 
+pub mod gesture;
 pub mod hints;
 pub mod vim;
