@@ -265,15 +265,18 @@ impl SerfDelegate {
     /// what Servo's default responder does, so only a positive block decision
     /// costs anything. Cosmetic filtering (`cosmetic_css`) hides what is left.
     fn block_if_filtered(&self, webview: &WebView, load: WebResourceLoad) {
+        // Counted before the engine check on purpose: "the hook never ran" and
+        // "there was no engine" are different bugs and the counter must tell
+        // them apart.
+        self.filtered.fetch_add(1, Ordering::Relaxed);
         let Some(adblock) = self.adblock.as_ref() else {
-            log::debug!("serf: request with no filter engine configured");
+            log::warn!("serf: a request arrived with no filter engine configured");
             return;
         };
         // Everything the decision needs is copied out first: `load` is consumed
         // by `intercept`, and `request` borrows it.
         let (url, decision) = {
             let request = load.request();
-            self.filtered.fetch_add(1, Ordering::Relaxed);
             let source = request
                 .referrer_url
                 .as_ref()
