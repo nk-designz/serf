@@ -115,6 +115,15 @@ checksum = "c2fb6cfd47bf496ff64095c20eaba0c201404ee38714d4142fcfa1dc334fcc7a"
 
 [[package]]
 name = "alloc-stdlib"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e76a019e91224d279006ff972f1e984179a6e9feb050adba6ce8274aef23195"
+dependencies = [
+ "alloc-no-stdlib 2.0.4",
+]
+
+[[package]]
+name = "alloc-stdlib"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b5c1865780388bfa186411ab5f247819487fc4864c6e9c3106611fa347586e1"
@@ -554,12 +563,23 @@ dependencies = [
 
 [[package]]
 name = "brotli"
+version = "8.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5cc91aac060a7a1e25823bdccbfb6af1875b88f17c6daac97894eed8207166b3"
+dependencies = [
+ "alloc-no-stdlib 2.0.4",
+ "alloc-stdlib 0.2.4",
+ "brotli-decompressor 5.0.3",
+]
+
+[[package]]
+name = "brotli"
 version = "9.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "627b7cfb0578f0eafce087a90fcd40add1231900b69e4d4de2d456260a4f5d81"
 dependencies = [
  "alloc-no-stdlib 3.0.0",
- "alloc-stdlib",
+ "alloc-stdlib 0.3.0",
  "brotli-decompressor 6.2.0",
 ]
 
@@ -570,6 +590,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a32acac15fe1967bc3986b2a6347dffc965602354ea6f450ad07e8bfd253583"
 dependencies = [
  "alloc-no-stdlib 2.0.4",
+ "alloc-stdlib 0.2.4",
 ]
 
 [[package]]
@@ -579,7 +600,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "34c6783f42c21c952ad7112b354f0ba2f10760e9decea5b1b60523d6e270faaf"
 dependencies = [
  "alloc-no-stdlib 3.0.0",
- "alloc-stdlib",
+ "alloc-stdlib 0.3.0",
 ]
 
 [[package]]
@@ -908,7 +929,7 @@ version = "0.4.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "84f840cff84d10085260e460023934d0af699e71212b09b2a41452e8bd9cda43"
 dependencies = [
- "brotli",
+ "brotli 9.1.1",
  "compression-core",
  "flate2",
  "memchr",
@@ -3457,6 +3478,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mozangle"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d5892d91814b6681a2406067efec53abe9ba4fe8748dcd99e4f5a96a99a05ac0"
+dependencies = [
+ "bindgen",
+ "cc",
+ "walkdir",
+]
+
+[[package]]
 name = "mozjs"
 version = "0.26.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5580,6 +5612,7 @@ dependencies = [
  "servo-tracing",
  "servo-url",
  "servo-wakelock",
+ "servo-webgl",
  "stylo",
  "stylo_traits",
  "surfman",
@@ -6522,6 +6555,7 @@ dependencies = [
  "servo-profile-traits",
  "servo-timers",
  "servo-tracing",
+ "servo-webgl",
  "smallvec",
  "stylo_traits",
  "surfman",
@@ -6632,6 +6666,7 @@ dependencies = [
  "base64 0.23.1",
  "base64ct",
  "bitflags 2.13.2",
+ "brotli 8.0.4",
  "buf-read-ext",
  "bytes",
  "chardetng",
@@ -6661,6 +6696,7 @@ dependencies = [
  "markup5ever",
  "mime",
  "mime_guess",
+ "mozangle",
  "mozjs",
  "nom-rfc8288",
  "num-traits",
@@ -6897,6 +6933,31 @@ checksum = "c6611b6c7cca3a37052ccfaf904afe6d2b5f670c54999dd9b66f3997e4eba672"
 dependencies = [
  "serde",
  "servo-embedder-traits",
+]
+
+[[package]]
+name = "servo-webgl"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52cff9d35818602510237795234e7cf162dde37f01d50f6dd3f0121e9b54610a"
+dependencies = [
+ "bitflags 2.13.2",
+ "byteorder",
+ "crossbeam-channel",
+ "euclid",
+ "glow",
+ "half",
+ "itertools 0.15.0",
+ "log",
+ "num-traits",
+ "parking_lot",
+ "rustc-hash",
+ "servo-base",
+ "servo-canvas-traits",
+ "servo-paint-api",
+ "servo-pixels",
+ "surfman",
+ "webrender_api",
 ]
 
 [[package]]

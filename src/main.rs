@@ -457,17 +457,20 @@ impl App {
                 let e = self.shared.session.lock().unwrap().apply(Command::Forward);
                 self.apply_effect(e);
             }
+            // Routed through `apply` (not the bare model methods) so the engine
+            // gets the Navigate effect and the shown page actually follows the
+            // tab change — see navigation.rs.
             Action::TabNext => {
-                self.shared.session.lock().unwrap().next_tab();
-                self.sync_status();
+                let e = self.shared.session.lock().unwrap().apply(Command::Next);
+                self.apply_effect(e);
             }
             Action::TabPrev => {
-                self.shared.session.lock().unwrap().prev_tab();
-                self.sync_status();
+                let e = self.shared.session.lock().unwrap().apply(Command::Prev);
+                self.apply_effect(e);
             }
             Action::TabClose => {
-                self.shared.session.lock().unwrap().close_active();
-                self.sync_status();
+                let e = self.shared.session.lock().unwrap().apply(Command::Close);
+                self.apply_effect(e);
             }
             Action::TabNew => {
                 let url = self

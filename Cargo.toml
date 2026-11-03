@@ -52,7 +52,19 @@ anyhow = "1"
 thiserror = "2"
 
 # --- Servo embedding backend (feature = "servo") ---
-servo = { version = "0.7", optional = true }
+# Servo's own `default` is [bundled, clipboard, js_jit, multiprocess] and does
+# NOT include default_web_features, so a bare dependency silently ships with no
+# WebGL and no brotli. Enable the subset that resolves and that this hardware
+# can actually use. Deliberately omitted:
+#   webcrypto — pulls aes-kw = "^0.3", which crates.io cannot satisfy any more
+#               (only 0.3.0-rc.* prereleases exist, and ^0.3 rejects prereleases
+#               by default), so enabling it makes the servo tree unresolvable.
+#   webgpu    — Mali-T860 (Midgard v5) has no Vulkan; PanVK is Bifrost v6+ only.
+#   webxr     — no XR hardware.
+servo = { version = "0.7", optional = true, features = [
+    "brotli-compression-stream",
+    "webgl",
+] }
 euclid = { version = "0.22", optional = true }
 url = { version = "2", optional = true }
 webrender_api = { version = "0.70", optional = true }

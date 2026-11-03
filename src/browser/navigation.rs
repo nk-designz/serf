@@ -281,21 +281,41 @@ impl Session {
                 self.new_tab(url.clone());
                 Effect::NewTab(url)
             }
-            Command::Close => {
-                self.close_active();
-                Effect::None
-            }
+            // Switching tabs has to drive the engine. serf keeps exactly one
+            // WebView (see engine.rs), so the newly-active tab's URL must be
+            // loaded or the visible page would never change — the status bar
+            // would just disagree with the screen. Returning Navigate only when
+            // the active tab actually moved keeps `J`/`K` inert in a
+            // single-tab session instead of reloading the page.
+            Command::Close => match self.close_active() {
+                Some(_) => Effect::Navigate(self.current().current().to_string()),
+                None => Effect::None,
+            },
             Command::Select(i) => {
-                self.select(i);
-                Effect::None
+                let prev = self.active;
+                if self.select(i) && self.active != prev {
+                    Effect::Navigate(self.current().current().to_string())
+                } else {
+                    Effect::None
+                }
             }
             Command::Next => {
+                let prev = self.active;
                 self.next_tab();
-                Effect::None
+                if self.active != prev {
+                    Effect::Navigate(self.current().current().to_string())
+                } else {
+                    Effect::None
+                }
             }
             Command::Prev => {
+                let prev = self.active;
                 self.prev_tab();
-                Effect::None
+                if self.active != prev {
+                    Effect::Navigate(self.current().current().to_string())
+                } else {
+                    Effect::None
+                }
             }
             Command::Back => match self.current_mut().back() {
                 Some(url) => Effect::Navigate(url.to_string()),
@@ -481,5 +501,29 @@ mod tests {
         assert_eq!(listing, "0: Alpha\n1: Beta");
         assert_eq!(s.parse_launcher_choice("1: Beta"), Some(1));
         assert_eq!(s.parse_launcher_choice("garbage"), None);
+    }
+
+    /// Tab switching must reach the engine, not just move an index — with one
+    /// WebView, a model-only switch leaves the old page on screen.
+    #[test]
+    fn switching_tabs_drives_the_engine() {
+        let mut s = Session::new("https://a/");
+        s.apply(Command::OpenNewTab("https://b/".into())); // active = 1
+        assert_eq!(s.active(), 1);
+
+        assert_eq!(s.apply(Command::Select(0)), Effect::Navigate("https://a/".into()));
+        assert_eq!(s.apply(Command::Next), Effect::Navigate("https://b/".into()));
+        assert_eq!(s.apply(Command::Prev), Effect::Navigate("https://a/".into()));
+        // Closing the active tab must load whatever becomes active.
+        assert_eq!(s.apply(Command::Close), Effect::Navigate("https://b/".into()));
+    }
+
+    #[test]
+    fn single_tab_next_prev_do_not_reload() {
+        let mut s = Session::new("https://only/");
+        assert_eq!(s.apply(Command::Next), Effect::None);
+        assert_eq!(s.apply(Command::Prev), Effect::None);
+        assert_eq!(s.apply(Command::Select(9)), Effect::None); // out of range
+        assert_eq!(s.apply(Command::Close), Effect::None); // last tab is kept
     }
 }
