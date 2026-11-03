@@ -63,7 +63,9 @@ serf/
   classified from `Sec-Fetch-Dest` (falling back to the URL's extension), so
   `$script`/`$image`/`$subdocument` rules match what they were written for.
   Filter lists are compiled once and **memory-mapped** (`from_cache`) instead of
-  re-parsed, which is what keeps the adblock footprint small.
+  re-parsed, which is what keeps the adblock footprint small. `serf-msg stats`
+  reports `blocked N of M filtered requests` so the hook is observable without
+  reading logs.
 
 * **Trackpad gestures.** Two-finger horizontal swipes navigate while `Ctrl` is
   held: left/right is history back/forward, and `Ctrl+Shift` makes the same
