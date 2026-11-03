@@ -9,6 +9,13 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# A cold Servo build is hours; a newer push supersedes it, and two of them
+# racing on the same ref just burns two runners. The cache still survives
+# (rust-cache saves in a post step), so the restart resumes warm.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # Fast signal on every push: everything except the web engine.
   default:
