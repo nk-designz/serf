@@ -40,13 +40,9 @@ jobs:
     name: servo build (aarch64)
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 360
-    # ARM runners are not available on every plan / for private repos, so this
-    # job stays parked until the repo variable SERVO_RUNNERS is set to
-    # "enabled" (or you dispatch it manually). That keeps CI green out of the
-    # box while leaving the heavy build one switch away.
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      vars.SERVO_RUNNERS == 'enabled'
+    # Runs on pushes to main and on manual dispatch, but not on PRs: a cold
+    # SpiderMonkey build is hours, and that is not a per-PR cost.
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4
 
