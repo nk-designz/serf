@@ -1056,10 +1056,12 @@ fn create_engine(
 /// winit: the loop blocks in its platform wait when the event queue is empty, and a
 /// wake that only sets a flag (which is what this did — the body was a comment)
 /// leaves that flag unread. The delegate's `notify_new_frame_ready` records
-/// `DelegateState::dirty`, and a loop turn is what drains it, so with no wake
-/// there is no turn: no `RedrawRequested`, no committed buffer, and the
-/// Wayland toplevel is created but never mapped. That was the whole of the
-/// "nothing paints" failure — the page had loaded and WebRender had initialized.
+/// `DelegateState::dirty`, and a loop turn is what drains it. Without that
+/// wake there is no turn to request redraws for subsequent frames, so a
+/// Wayland toplevel can remain unmapped even though WebRender initialized.
+/// The other half of the first-paint path is `Engine::spin`/`Engine::present`:
+/// they must be implemented on the trait, not just as inherent methods of
+/// `ServoEngine`, because `App` holds `Box<dyn Engine>`.
 #[cfg(feature = "servo")]
 #[derive(Clone)]
 struct ServoWaker {
