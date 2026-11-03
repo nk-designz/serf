@@ -187,6 +187,10 @@ impl Config {
 
     /// Load from a path; a missing file yields `Config::default()` so a fresh
     /// install still starts (surf-style: sane defaults, no wizard).
+    ///
+    /// That tolerance belongs to the *default* path only: `main` refuses a `-c`/
+    /// `--config` path that does not exist, so a mistyped filename cannot quietly run
+    /// the session against `~/.config/serf/config.toml` instead of the one asked for.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         match std::fs::read_to_string(path) {
             Ok(text) => Self::from_str(&text).map_err(|source| ConfigError::Parse {

@@ -115,10 +115,22 @@ fn main() -> Result<()> {
         }
     }
 
-    let config_path = match config_path {
-        Some(p) => p,
-        None => Config::default_path()?,
+    let (config_path, named) = match config_path {
+        Some(p) => (p, true),
+        None => (Config::default_path()?, false),
     };
+    // **A named config that is not there is a typo, not a fresh install.** A missing
+    // file is tolerated only at the *default* path, where "no config yet, run on the
+    // defaults" is the surf-style greeting. Reaching this with `-c /tmp/serf-probe.toml`
+    // whose name was mistyped used to start the whole session on `~/.config/serf/config.toml`
+    // — which is a measurement against a config nobody chose, and it looks like a
+    // success. Same spirit as `deny_unknown_fields`: fail loudly at startup.
+    if named && !config_path.exists() {
+        anyhow::bail!(
+            "no such config file: {} (omit -c/--config to run on the defaults)",
+            config_path.display()
+        );
+    }
     let cfg = Config::load(&config_path)
         .with_context(|| format!("loading {}", config_path.display()))?;
 
@@ -267,7 +279,7 @@ fn print_usage() {
          USAGE: serf [OPTIONS] [URL]\n\
          \n\
          OPTIONS:\n\
-         \x20 -c, --config <PATH>        config file (default ~/.config/serf/config.toml)\n\
+         \x20 -c, --config <PATH>        config file, must exist (default ~/.config/serf/config.toml)\n\
          \x20     --build-adblock-cache  compile the filter lists and exit\n\
          \x20 -V, --version              print the version and the engine backend\n\
          \x20 -h, --help                 this message\n\
