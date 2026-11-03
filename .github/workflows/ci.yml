@@ -47,9 +47,20 @@ jobs:
     name: servo build (aarch64)
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 360
-    # Runs on pushes to main and on manual dispatch, but not on PRs: a cold
-    # SpiderMonkey build is hours, and that is not a per-PR cost.
+    # Runs on pushes to main and on manual dispatch, but not on PRs. The old
+    # reason here was "a cold SpiderMonkey build is hours" — that was wrong, the
+    # runner does it cold in ~8 minutes. Left gated for now only to avoid
+    # spending an ARM runner on every push to a branch; widen it if PRs start
+    # needing it.
     if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    # ~950 crates compile before this build even reaches serf, so most failures
+    # are in code serf is not touching yet. rust-cache's post step is gated on
+    # `success() || env.CACHE_ON_FAILURE == 'true'`, so by default a FAILED build
+    # throws away the cached dependencies and every retry pays the full ~7 minute
+    # recompile again. Setting this keeps the dependency cache across failures,
+    # which turns the fix-and-retry loop from ~12 minutes into ~3.
+    env:
+      CACHE_ON_FAILURE: "true"
     steps:
       - uses: actions/checkout@v4
 
