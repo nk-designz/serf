@@ -1082,6 +1082,57 @@ impl ApplicationHandler<UserEvent> for App {
     }
 }
 
+/// Initialise Servo's process-global options exactly once, pointing storage at
+/// serf's own data directory.
+///
+/// Servo keeps its storage location in `servo_config::opts`, a `OnceLock`:
+/// whoever calls `initialize_options` first wins, a second call panics, and
+/// reading it before that silently freezes the defaults. So this runs before the
+/// first `Servo` is built. `Once` makes it safe for any later path that builds
+/// another engine (popups do).
+#[cfg(feature = "servo")]
+fn init_servo_options() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+
+    INIT.call_once(|| {
+        let mut opts = servo::Opts::default();
+        if let Some(dir) = servo_data_dir() {
+            // Best effort: an unusable data dir degrades to in-memory storage,
+            // which is what serf did before this existed.
+            match std::fs::create_dir_all(&dir) {
+                Ok(()) => {
+                    log::info!("serf: servo storage in {}", dir.display());
+                    opts.config_dir = Some(dir);
+                }
+                Err(e) => log::warn!(
+                    "serf: cannot create {} ({e}); site data will not persist",
+                    dir.display()
+                ),
+            }
+        }
+        // Not a temporary profile: the whole point is surviving a restart.
+        opts.temporary_storage = false;
+        servo::opts::initialize_options(opts);
+    });
+}
+
+/// Where Servo keeps storage (localStorage, IndexedDB, cache storage).
+///
+/// Follows `XDG_DATA_HOME` like the rest of serf's state, and uses its own
+/// subdirectory so a corrupt site-data store can be deleted without touching the
+/// adblock filter cache next to it.
+#[cfg(feature = "servo")]
+fn servo_data_dir() -> Option<std::path::PathBuf> {
+    let base = match std::env::var_os("XDG_DATA_HOME") {
+        Some(dir) if !dir.is_empty() => std::path::PathBuf::from(dir),
+        _ => std::path::PathBuf::from(std::env::var_os("HOME")?)
+            .join(".local")
+            .join("share"),
+    };
+    Some(base.join("serf").join("servo"))
+}
+
 /// Create the engine backend for this build.
 ///
 /// Without the `servo` feature this is the [`StubEngine`]; with it, a real
@@ -1107,6 +1158,13 @@ fn create_engine(
         use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
         let window = window.context("the servo backend needs a winit window")?;
+
+        // Servo keeps its storage directories and a few other settings in a
+        // process-global that must be initialised once, before the first
+        // `Servo` exists. Without a `config_dir`, storage threads run purely in
+        // memory and every site forgets you on restart.
+        init_servo_options();
+
         let display_handle = window.display_handle().context("display handle")?;
         let window_handle = window.window_handle().context("window handle")?;
         // `surfman::error::Error` implements neither `std::error::Error` nor
