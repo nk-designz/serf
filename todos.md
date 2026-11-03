@@ -165,6 +165,99 @@ that need it are mostly internal/dev services.
 
 ---
 
+## 1.6 Platform APIs: implemented in Servo, switched off in serf — **VERIFIED**
+
+The most misleading thing about this project's status. Servo 0.7 implements far
+more than serf turns on. Its preferences are macro-generated `bool` fields with
+defaults (`servo-config-0.7.0/prefs.rs`), and **serf passes no `Preferences` at
+all** (`ServoBuilder::default()` in `src/main.rs`), so every default applies —
+and the defaults are largely *off*.
+
+Interfaces are gated by name in the WebIDL (`Pref="dom_x_enabled"` in
+`servo-script-bindings-0.7.0/webidls/`), so the gate is authoritative and
+mechanically checkable.
+
+### How to turn any of this on
+
+`Preferences` has `pub` fields and a `Default` impl
+(`servo-config-0.7.0/prefs.rs:615`), and `ServoBuilder::preferences()` accepts
+one (`servo-0.7.0/servo.rs:1476`). So it is a type-safe struct literal, not
+string key fiddling:
+
+```rust
+ServoBuilder::default()
+    .preferences(servo::preferences::Preferences {
+        dom_indexeddb_enabled: true,
+        dom_serviceworker_enabled: true,
+        ..Default::default()
+    })
+```
+
+`Servo::set_preference(name, PrefValue)` also exists for runtime changes, but the
+name format it expects would need checking; the struct literal avoids the
+question and covers startup.
+
+**Caveat, and it is a real one:** enabled ≠ working. Some paths behind these
+prefs are `unimplemented!()` / `todo!()` and will **panic** if reached —
+IndexedDB has one on `multiEntry` keys
+(`dom/indexeddb/key.rs:813`). So switch prefs on deliberately and actually
+exercise the feature; do not flip the whole set at once and assume it is fine.
+
+### The state of each area
+
+| area | state | note |
+|---|---|---|
+| **cookies / sessions** | `document.cookie` works | **not** pref-gated (plain `attribute DOMString cookie;` in `Document.webidl`). The new `cookieStore` API *is* gated (`dom_cookiestore_enabled=false`) — that is the modern API only, not cookies themselves. |
+| cookie persistence | **broken** | no `Opts.config_dir`, so cookies are in-memory. See §1.4. This is the §1.4 fix; nothing else needed. |
+| **HTTP cache** | on, but RAM only | `network_http_cache_disabled=false`. Servo's own `NetworkManager` docs say an on-disk cache is "under development", so every restart is cold. Not fixable from serf. |
+| Cache API / CacheStorage | **off** | gated by `dom_serviceworker_enabled`; moot without service workers. |
+| **WebSQL** | absent | not in Servo's DOM at all, and not a gap — Web SQL Database is a withdrawn spec no browser should still ship. |
+| **IndexedDB** | **implemented, off** | `dom/indexeddb/` is 13 files / ~6.5k lines, not a stub, but `dom_indexeddb_enabled=false` gates 12 interfaces. Sites using it for local state get nothing today. |
+| **service workers** | **implemented, off** | `dom/serviceworker/` is 14 files / ~4.8k lines with no `todo!`/`unimplemented!` stubs, but `dom_serviceworker_enabled=false` gates 13 interfaces including `navigator.serviceWorker` and `caches`. Wants persistent storage (§1.4) to be meaningful. |
+| **notifications** | **implemented, off, and serf lacks the hook** | fully plumbed: `Notification.webidl` is pref-gated by `dom_notification_enabled=false`, `PermissionFeature::Notifications` exists, and the display path is real — `EmbedderMsg::ShowNotification(Option<WebViewId>, Notification)` and **`ServoDelegate::show_notification(&self, Notification)`** (`servo-0.7.0/servo_delegate.rs:40`). serf implements neither that nor permission prompting. |
+| permissions | **off** | `dom_permissions_enabled=false`; also needed for notifications to be grantable. |
+
+To actually *display* a notification on this desktop, the embedder has to talk to
+`org.freedesktop.Notifications` over D-Bus (mako/dunst on wlroots/scenefx) —
+Servo hands serf the `Notification` and stops. ~50 lines, or shell out to
+`notify-send`. `PermissionFeature` lists the full set an embedder must decide on:
+`Geolocation, Notifications, Push, Midi, Camera, Microphone, Speaker, DeviceInfo,
+BackgroundSync, Bluetooth, PersistentStorage, ScreenWakeLock, Gamepad`.
+
+### And the ones that quietly hurt ordinary browsing
+
+These are *not* exotic. They are off by default today, and several are used by
+ordinary sites:
+
+| API | default | consequence |
+|---|---|---|
+| `dom_webgl2_enabled` | **false** | only **WebGL1**. Lots of 3D/canvas work needs WebGL2. |
+| `dom_intersection_observer_enabled` | **false** | breaks lazy-loading images and infinite scroll — sites look broken/incomplete. |
+| `dom_web_animations_enabled` | **false** | no `element.animate()`; a very common animation/interaction path. |
+| `dom_composition_event_enabled` | **false** | **no IME** — CJK input and dead keys in text fields do not work. Only matters if you type a non-Latin script, then it is fatal. |
+| `dom_exec_command_enabled` | **false** | `document.execCommand` gone → in-page "copy" buttons and some editors degrade. |
+| `dom_async_clipboard_enabled` | **false** | no `navigator.clipboard` (the *browser-level* clipboard still works — see §3). |
+| `dom_fontface_enabled` | **false** | JS-loaded web fonts (`new FontFace(...)`) fail. |
+| `dom_worklet_enabled` | **false** | no AudioWorklet / PaintWorklet / Houdini. |
+| `dom_webrtc_enabled`, `dom_geolocation_enabled`, `dom_bluetooth_enabled`, `dom_wakelock_enabled`, `dom_credential_management_enabled`, `dom_visual_viewport_enabled`, `dom_offscreen_canvas_enabled`, `dom_storage_manager_api_enabled` | false | mostly acceptable for browsing; wake lock matters for video. |
+
+On by default and working: `localStorage` / `sessionStorage` (not gated at all),
+`dom_crypto_subtle_enabled` (**SubtleCrypto works** — good, many sites need it),
+`dom_resize_observer_enabled`, `dom_sharedworker_enabled`, `dom_canvas_text_enabled`.
+
+`dom_gamepad_enabled` and `dom_webxr_enabled` default to *true* but are moot:
+servo's `gamepad` / `webxr` / `webgpu` **cargo features** are compiled out in
+serf (only `brotli-compression-stream`, `webgl`, `webcrypto`, `media-gstreamer`
+are added on top of servo's defaults — and the defaults do include `clipboard`,
+which is why the clipboard works).
+
+**Action:** turning this around is mostly a `Preferences` table in
+`create_engine` plus per-API verification, not a coding project. Treat it as its
+own pass with its own CI round, and enable in small batches so a panic tells you
+which API caused it.
+
+---
+
 ## 2. P1 — the difference between "works" and "good"
 
 ### 2.1 Network-level adblocking — **VERIFIED API, not implemented**
@@ -357,10 +450,17 @@ touching Servo's media stack, and it is consistent with the suckless design.
 
 1. **Confirm the engine binary runs at all** — GL/Panfrost, the overlay, input.
    Nothing above matters until this is true.
-2. **`Opts.config_dir`** (§1.4) — one line, makes logins survive a restart.
+2. **`Opts.config_dir` + a `Preferences` table** (§1.4, §1.6) — one change, and it
+   buys persistent logins *and* WebGL2, IntersectionObserver, Web Animations,
+   IndexedDB, service workers and notifications. Highest value per line in this
+   file — but enable prefs in small batches and actually exercise each one, since
+   some paths behind them panic (§1.6).
 3. **Real modal dialogs** (§1.1) — reuses the launcher and overlay, removes a
    whole class of silent misbehaviour.
 4. **mpv hand-off keybinding** (§4) — small, and gives video immediately.
-5. **Network-level adblocking** (§2.1) — the mission spec's outstanding item.
-6. Then §1.2/§1.3 (downloads, popups) — the two hardest, and both may need
+5. **Notification display** (§1.6) — needs `show_notification` plus a D-Bus call
+   to `org.freedesktop.Notifications` and permission prompting; only worth doing
+   once the prefs are on.
+6. **Network-level adblocking** (§2.1) — the mission spec's outstanding item.
+7. Then §1.2/§1.3 (downloads, popups) — the two hardest, and both may need
    research before they need code.

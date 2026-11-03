@@ -110,16 +110,22 @@ jobs:
       - name: Unit tests with the Servo engine
         run: cargo test --release --features servo --locked -j "$(nproc)" --lib
 
+      # `if: always()` on purpose: the ~8-minute engine build is the expensive,
+      # fragile part, and its output is worth having (and worth testing by hand
+      # on the Pinebook) even when a unit test is red. A failing test must not
+      # silently cost us the binary, which is exactly what happened once.
       - name: Report the artifact
+        if: always()
         run: |
-          ls -lh target/release/serf target/release/serf-msg
-          file target/release/serf
+          ls -lh target/release/serf target/release/serf-msg || true
+          file target/release/serf || true
 
       - name: Upload binaries
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: serf-aarch64-servo
           path: |
             target/release/serf
             target/release/serf-msg
-          if-no-files-found: error
+          if-no-files-found: warn

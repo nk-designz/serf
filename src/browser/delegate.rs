@@ -654,22 +654,25 @@ mod tests {
         assert!(state.pending_control().is_none());
     }
 
+    /// `servo::RgbColor` is a foreign type that does not implement `PartialEq`
+    /// (servo-embedder-traits-0.7.0/lib.rs:1112), so compare its channels rather
+    /// than the struct.
+    fn rgb(c: RgbColor) -> (u8, u8, u8) {
+        (c.red, c.green, c.blue)
+    }
+
     #[test]
     fn parse_hex_accepts_the_forms_a_colour_input_gets() {
-        let expected = Some(RgbColor {
-            red: 0xcf,
-            green: 0x6a,
-            blue: 0x4c,
-        });
-        assert_eq!(parse_hex("#cf6a4c"), expected);
-        assert_eq!(parse_hex("cf6a4c"), expected);
-        assert_eq!(parse_hex("  #CF6A4C  "), expected);
+        let expected = Some((0xcf, 0x6a, 0x4c));
+        assert_eq!(parse_hex("#cf6a4c").map(rgb), expected);
+        assert_eq!(parse_hex("cf6a4c").map(rgb), expected);
+        assert_eq!(parse_hex("  #CF6A4C  ").map(rgb), expected);
     }
 
     #[test]
     fn parse_hex_rejects_anything_else() {
         for bad in ["", "#", "#fff", "cf6a4", "cf6a4cc", "#gggggg", "not a colour"] {
-            assert_eq!(parse_hex(bad), None, "{bad:?} should not parse");
+            assert_eq!(parse_hex(bad).map(rgb), None, "{bad:?} should not parse");
         }
     }
 }
