@@ -120,6 +120,11 @@ pub trait Engine {
     fn scroll_by(&mut self, dx: f64, dy: f64);
     /// Set the page zoom factor.
     fn set_zoom(&mut self, zoom: f32);
+    /// Save what should survive a restart (cookies). A no-op for engines with
+    /// nothing to persist, which is why it has a default.
+    fn save_session(&mut self) {}
+    /// Reload what `save_session` wrote. Called once, before the first page.
+    fn restore_session(&mut self) {}
     /// Inject a user stylesheet (used for cosmetic adblocking and theming).
     fn inject_css(&mut self, css: &str);
     /// Ask the engine to enumerate the page's links into `sink`.
@@ -615,6 +620,24 @@ pub mod servo_backend {
             if let Err(e) = result {
                 log::warn!("serf: scroll failed: {e}");
             }
+        }
+
+        fn save_session(&mut self) {
+            let Some(path) = crate::browser::cookies::store_path() else {
+                return;
+            };
+            let origins = self.delegate.visited_origins();
+            if origins.is_empty() {
+                return;
+            }
+            crate::browser::cookies::save(&self.servo, &origins, &path);
+        }
+
+        fn restore_session(&mut self) {
+            let Some(path) = crate::browser::cookies::store_path() else {
+                return;
+            };
+            crate::browser::cookies::restore(&self.servo, &path);
         }
 
         fn set_zoom(&mut self, zoom: f32) {

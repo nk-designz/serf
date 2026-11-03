@@ -680,7 +680,14 @@ impl App {
                 self.vim.set_keymap(Keymap::defaults().with_overrides(&cfg.keybindings));
                 let _ = engine.inject_css(&self.theme.page_stylesheet());
             }
-            Effect::Quit => std::process::exit(0),
+            Effect::Quit => {
+                // Servo's cookie jar is memory-only, so this is the only chance
+                // to write it. Errors are already logged inside `save_session`.
+                if let Some(engine) = self.engine.as_mut() {
+                    engine.save_session();
+                }
+                std::process::exit(0)
+            }
             Effect::None => {}
         }
         self.sync_status();
@@ -1162,7 +1169,10 @@ fn create_engine(
             .build();
         servo.setup_logging();
 
-        let engine = ServoEngine::new(servo, context, adblock, filtered, blocked);
+        let mut engine = ServoEngine::new(servo, context, adblock, filtered, blocked);
+        // Before the first page loads: a restored cookie must already be in the
+        // jar when the site asks who you are, not arrive after the first request.
+        engine.restore_session();
         let url = url::Url::parse(homepage).context("invalid homepage URL")?;
         engine.create_webview(&url, window.scale_factor() as f32)?;
         Ok(Box::new(engine))

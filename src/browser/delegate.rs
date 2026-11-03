@@ -75,6 +75,8 @@ struct Inner {
     /// `Servo::spin_event_loop` is running — that is the thread the callback
     /// arrives on.
     finished_aux: Vec<WebViewId>,
+    /// Origins this session has navigated to, deduped, in visit order.
+    visited_origins: Vec<Url>,
     /// A new frame is ready to paint.
     dirty: bool,
     /// Whether the page consumed the last key serf forwarded.
@@ -151,7 +153,23 @@ impl DelegateState {
     // accumulation rules are testable without a live Servo.
 
     fn note_url(&self, url: String) {
-        self.inner.borrow_mut().state.url = Some(url);
+        let mut inner = self.inner.borrow_mut();
+        // Remember the origin: Servo's cookie jar is memory-only, so saving it
+        // at exit needs the set of origins this session actually touched.
+        if let Ok(parsed) = Url::parse(&url) {
+            let origin = parsed.origin();
+            if !inner.visited_origins.iter().any(|u: &Url| u.origin() == origin) {
+                if let Ok(origin_url) = Url::parse(&origin.ascii_serialization()) {
+                    inner.visited_origins.push(origin_url);
+                }
+            }
+        }
+        inner.state.url = Some(url);
+    }
+
+    /// The origins this session has seen, for cookie persistence.
+    pub fn visited_origins(&self) -> Vec<Url> {
+        self.inner.borrow().visited_origins.clone()
     }
 
     fn note_title(&self, title: Option<String>) {

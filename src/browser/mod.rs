@@ -7,6 +7,8 @@
 //! with the `servo` feature.
 
 #[cfg(feature = "servo")]
+pub mod cookies;
+#[cfg(feature = "servo")]
 pub mod delegate;
 pub mod engine;
 pub mod launcher;

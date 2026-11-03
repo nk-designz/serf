@@ -24,7 +24,7 @@ path = "src/bin/serf-msg.rs"
 default = []
 # The Servo engine backend. Off by default because pulling it in requires
 # building SpiderMonkey (mozjs_sys) from source — see README / BUILD notes.
-servo = [ "dep:servo", "dep:euclid", "dep:url", "dep:webrender_api", "dep:tracing", "dep:pkcs1", "dep:keyboard-types" ]
+servo = [ "dep:servo", "dep:euclid", "dep:url", "dep:webrender_api", "dep:tracing", "dep:pkcs1", "dep:keyboard-types", "dep:cookie" ]
 
 [dependencies]
 # --- Wayland-only windowing: no GTK, no Qt, no X11 ---
@@ -59,6 +59,11 @@ thiserror = "2"
 # can actually use. Deliberately omitted:
 #   webgpu    — Mali-T860 (Midgard v5) has no Vulkan; PanVK is Bifrost v6+ only.
 #   webxr     — no XR hardware.
+# The `Cookie` type `SiteDataManager` exchanges. Pinned to the version
+# `servo-net-traits` resolves so cargo unifies the two into one crate and
+# serf's cookie file speaks the same type the engine does.
+cookie = { version = "0.18", optional = true }
+
 servo = { version = "0.7", optional = true, features = [
     "brotli-compression-stream",
     "webgl",
