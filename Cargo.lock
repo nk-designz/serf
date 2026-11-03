@@ -6611,6 +6611,7 @@ dependencies = [
  "env_logger",
  "euclid",
  "keyboard-types",
+ "libc",
  "log",
  "memmap2",
  "mimalloc",

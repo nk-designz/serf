@@ -11,6 +11,7 @@
 //!   the window's rendering path: the page owns the whole viewport (surf's
 //!   "zero-UI core"), and the status line appears as a compositor-drawn bar.
 
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -283,16 +284,41 @@ pub struct OverlayState {
     palette: Mutex<Palette>,
     visible: AtomicBool,
     dirty: AtomicBool,
+    /// Wakes the Wayland presenter when status changes; without it the thread
+    /// blocks in `blocking_dispatch` forever after the initial configure.
+    wake: Option<OwnedFd>,
 }
 
 impl OverlayState {
     pub fn new(status: StatusLine, palette: Palette, visible: bool) -> Self {
+        let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
+        let wake = (fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd) });
         Self {
             status: Mutex::new(status),
             palette: Mutex::new(palette),
             visible: AtomicBool::new(visible),
             dirty: AtomicBool::new(true),
+            wake,
         }
+    }
+
+    fn signal_wake(&self) {
+        if let Some(fd) = self.wake.as_ref() {
+            let one = 1u64.to_ne_bytes();
+            // Nonblocking eventfd coalesces repeated updates. EAGAIN only means
+            // a wake is already pending, so there is nothing to retry.
+            unsafe { libc::write(fd.as_raw_fd(), one.as_ptr().cast(), one.len()) };
+        }
+    }
+
+    fn drain_wake(&self) -> bool {
+        let Some(fd) = self.wake.as_ref() else { return false };
+        let mut count = [0u8; 8];
+        (unsafe { libc::read(fd.as_raw_fd(), count.as_mut_ptr().cast(), count.len()) }) == 8
+    }
+
+    fn wake_fd(&self) -> Option<i32> {
+        self.wake.as_ref().map(AsRawFd::as_raw_fd)
     }
 
     pub fn set_status(&self, status: StatusLine) {
@@ -300,6 +326,7 @@ impl OverlayState {
             *guard = status;
         }
         self.dirty.store(true, Ordering::Release);
+        self.signal_wake();
     }
 
     pub fn status(&self) -> StatusLine {
@@ -311,6 +338,7 @@ impl OverlayState {
             *guard = palette;
         }
         self.dirty.store(true, Ordering::Release);
+        self.signal_wake();
     }
 
     pub fn palette(&self) -> Palette {
@@ -323,6 +351,7 @@ impl OverlayState {
     pub fn set_visible(&self, visible: bool) {
         self.visible.store(visible, Ordering::Release);
         self.dirty.store(true, Ordering::Release);
+        self.signal_wake();
     }
 
     pub fn is_visible(&self) -> bool {
@@ -365,7 +394,7 @@ pub fn spawn_layer_overlay(
 }
 
 mod wayland_surface {
-    use std::os::fd::AsFd;
+    use std::os::fd::{AsFd, AsRawFd};
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -586,12 +615,36 @@ mod wayland_surface {
             .blocking_dispatch(&mut state)
             .context("waiting for the initial layer configure")?;
 
+        // Wait for either a Wayland configure/close or a status update. The
+        // previous blocking_dispatch only woke for Wayland events, so typing a
+        // command changed `OverlayState` but never repainted the bar. Polling
+        // the eventfd keeps the thread asleep when nothing changes.
         loop {
-            queue
-                .blocking_dispatch(&mut state)
-                .context("dispatching wayland events for the overlay")?;
+            queue.dispatch_pending(&mut state).context("dispatching overlay events")?;
             if state.shared.take_dirty() {
                 state.redraw(&qh)?;
+            }
+            queue.flush().context("flushing overlay requests")?;
+            let Some(guard) = queue.prepare_read() else { continue };
+            let wake_fd = state.shared.wake_fd();
+            let mut fds = [
+                libc::pollfd { fd: guard.connection_fd().as_raw_fd(), events: libc::POLLIN, revents: 0 },
+                libc::pollfd { fd: wake_fd.unwrap_or(-1), events: libc::POLLIN, revents: 0 },
+            ];
+            let timeout = if wake_fd.is_some() { -1 } else { 100 };
+            let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
+            if ready < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error).context("polling overlay event sources");
+            }
+            if fds[1].revents != 0 {
+                state.shared.drain_wake();
+            }
+            if fds[0].revents != 0 {
+                guard.read().context("reading Wayland overlay events")?;
             }
         }
     }
@@ -742,6 +795,21 @@ mod tests {
         c.write_to(&mut out);
         assert_eq!(&out[0..4], &[0x33, 0x22, 0x11, 0xff]);
         assert_eq!(&out[4..8], &[0x33, 0x22, 0x11, 0xff]);
+    }
+
+    #[test]
+    fn overlay_updates_wake_the_renderer() {
+        let state = OverlayState::new(
+            StatusLine::default(),
+            Palette::catppuccin("mocha"),
+            false,
+        );
+        state.drain_wake();
+        state.set_visible(true);
+        assert!(state.drain_wake());
+        assert!(!state.drain_wake());
+        state.set_status(StatusLine { mode: "command".into(), ..Default::default() });
+        assert!(state.drain_wake());
     }
 
     #[test]

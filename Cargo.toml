@@ -33,6 +33,7 @@ winit = { version = "0.30", default-features = false, features = ["wayland", "rw
 # in the spirit of the suckless tools serf is modelled on).
 wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+libc = "0.2" # eventfd/poll wake the overlay without a busy timer
 
 # --- Adblocking engine ---
 adblock = "0.13"
