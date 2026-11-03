@@ -412,6 +412,7 @@ impl Engine for StubEngine {
 pub mod servo_backend {
     use std::cell::RefCell;
     use std::rc::Rc;
+    use std::sync::Arc;
 
     use anyhow::{anyhow, Result};
     // `servo` re-exports the keyboard *primitives* (Key, Code, KeyState, Location,
