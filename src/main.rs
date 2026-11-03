@@ -78,6 +78,9 @@ struct Shared {
     blocked: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Requests the page layer asked the filter about, blocked or not.
     filtered: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Why the filter engine is not loaded, if it is not. A silent `None` here
+    /// means "no network adblocking" and nothing else says so.
+    adblock_error: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -151,6 +154,7 @@ fn main() -> Result<()> {
     let theme = Theme::resolve(&cfg.theme, &cfg.colors);
 
     // Compile or mmap the adblock engine.
+    let mut adblock_error = None;
     let adblock = if cfg.adblock.enabled {
         let lists: Vec<PathBuf> = cfg.adblock.lists.iter().map(|s| config::expand_tilde(s)).collect();
         let cache = config::expand_tilde(&cfg.adblock.cache);
@@ -158,6 +162,7 @@ fn main() -> Result<()> {
             Ok(engine) => Some(std::rc::Rc::new(engine)),
             Err(e) => {
                 log::warn!("serf: adblock disabled ({e}); continuing without it");
+                adblock_error = Some(format!("{e:#}"));
                 None
             }
         }
@@ -187,6 +192,7 @@ fn main() -> Result<()> {
         overlay: overlay.clone(),
         blocked: blocked.clone(),
         filtered: filtered.clone(),
+        adblock_error,
     });
 
     // Start the layer-shell status overlay on its own connection/thread. A
@@ -255,7 +261,11 @@ fn serve_command(shared: &Arc<Shared>, proxy: &EventLoopProxy<UserEvent>, line: 
         let blocked = shared.blocked.load(std::sync::atomic::Ordering::Relaxed);
         let filtered = shared.filtered.load(std::sync::atomic::Ordering::Relaxed);
         return Response::ok(format!("blocked {blocked} of {filtered} filtered requests"))
-            .with_data(serde_json::json!({ "blocked": blocked, "filtered": filtered }));
+            .with_data(serde_json::json!({
+                "blocked": blocked,
+                "filtered": filtered,
+                "adblock_error": shared.adblock_error,
+            }));
     }
     let (response, effect) = {
         let mut session = match shared.session.lock() {
@@ -1115,7 +1125,7 @@ fn create_engine(
             .build();
         servo.setup_logging();
 
-        let engine = ServoEngine::new(servo, context, adblock, blocked, filtered);
+        let engine = ServoEngine::new(servo, context, adblock, filtered, blocked);
         let url = url::Url::parse(homepage).context("invalid homepage URL")?;
         engine.create_webview(&url, window.scale_factor() as f32)?;
         Ok(Box::new(engine))
