@@ -42,8 +42,10 @@ use super::engine::{ControlChoice, ControlRequest, PageState};
 
 /// How many `window.open` web views serf keeps alive before it starts ignoring
 /// them. Each one holds a whole page, so this is a memory guard on a 4 GB box,
-/// not a feature limit.
-const MAX_AUX_WEBVIEWS: usize = 8;
+/// not a feature limit. Two is enough for the `window.open` → redirect pattern
+/// ad and OAuth popups use, and a view is dropped as soon as it finishes
+/// loading, so this is a ceiling on *concurrent* popups, not a cache.
+const MAX_AUX_WEBVIEWS: usize = 2;
 
 /// Everything the delegate has learned that the event loop has not consumed yet.
 ///
@@ -220,7 +222,46 @@ impl DelegateState {
 
     /// Keep an auxiliary web view alive for the page's `window.open` handle.
     fn adopt_aux(&self, webview: WebView) {
-        self.inner.borrow_mut().aux.push(webview);
+        let mut inner = self.inner.borrow_mut();
+        // Drop the oldest first rather than refusing the new one: a page that
+        // opens a popup expects `win` to exist, and the oldest handle is the one
+        // least likely to still be polled.
+        if inner.aux.len() >= MAX_AUX_WEBVIEWS {
+            let doomed = inner.aux.remove(0);
+            drop(inner);
+            drop(doomed);
+            inner = self.inner.borrow_mut();
+        }
+        inner.aux.push(webview);
+    }
+
+    /// Forget an auxiliary view once its document has finished loading.
+    ///
+    /// Keeping every popup a page ever opened is what made a browsing session
+    /// grow by hundreds of megabytes: each retained view is a full pipeline.
+    /// Once the load completes the handle has done its job, and dropping the
+    /// view closes it (so `win.closed` becomes true, which pages tolerate).
+    fn release_aux(&self, id: WebViewId) {
+        let doomed: Vec<WebView> = {
+            let mut inner = self.inner.borrow_mut();
+            let mut doomed = Vec::new();
+            let mut keep = Vec::with_capacity(inner.aux.len());
+            for view in inner.aux.drain(..) {
+                if view.id() == id {
+                    doomed.push(view);
+                } else {
+                    keep.push(view);
+                }
+            }
+            inner.aux = keep;
+            doomed
+        };
+        if !doomed.is_empty() {
+            log::debug!("serf: released {} finished popup view(s)", doomed.len());
+        }
+        // Dropped outside the `RefCell` borrow: each drop sends constellation
+        // messages and must not re-enter this state.
+        drop(doomed);
     }
 }
 
@@ -346,6 +387,10 @@ impl WebViewDelegate for SerfDelegate {
 
     fn notify_load_status_changed(&self, webview: WebView, status: LoadStatus) {
         if !self.is_main(&webview) {
+            // A popup that finished loading no longer needs to be retained.
+            if status == LoadStatus::Complete {
+                self.state.release_aux(webview.id());
+            }
             return;
         }
         self.state.note_loading(match status {
