@@ -427,4 +427,15 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn the_shipped_example_binds_only_real_actions() {
+        // The example is a working config, so every chord in it must parse and
+        // every action must exist — this is the guard that would have caught
+        // `command-submit` being documented before it was an action.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config.example.toml");
+        let cfg = Config::load(&path).expect("the example config loads");
+        let problems = crate::input::vim::Keymap::problems(&cfg.keybindings);
+        assert!(problems.is_empty(), "{problems:?}");
+    }
 }
